@@ -1,0 +1,14 @@
+{
+  "name": "easyread-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "EasyRead backend proxy for OpenAI requests",
+  "scripts": {
+    "start": "node index.mjs",
+    "start:env": "node --env-file=.env index.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
