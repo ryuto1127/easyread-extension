@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "EasyRead",
+  "version": "0.1.0",
+  "description": "Explain selected English text in simple English with vocabulary help.",
+  "permissions": ["storage", "activeTab", "contextMenus"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content.js"],
+      "css": ["src/content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options/options.html"
+}

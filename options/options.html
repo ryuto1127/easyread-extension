@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EasyRead Options</title>
+    <link rel="stylesheet" href="./options.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header>
+        <h1>EasyRead Settings</h1>
+        <p>
+          No user API key needed. EasyRead sends selected text to your EasyRead backend, which calls OpenAI.
+        </p>
+      </header>
+
+      <form id="settings-form">
+        <section class="card">
+          <h2>Backend</h2>
+          <label class="field">
+            <span>API Server URL</span>
+            <input
+              id="proxyBaseUrl"
+              type="url"
+              spellcheck="false"
+              placeholder="https://easyread-api.example.com"
+            />
+          </label>
+          <label class="field">
+            <span>Model</span>
+            <input id="model" type="text" value="gpt-4.1-mini" />
+          </label>
+          <label class="check">
+            <input id="enableModeration" type="checkbox" />
+            <span>Enable moderation checks (input/output)</span>
+          </label>
+        </section>
+
+        <div class="actions">
+          <button type="submit" class="primary">Save Settings</button>
+          <button type="button" id="clearCache">Clear Cache</button>
+          <span id="status" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+    </main>
+
+    <script type="module" src="./options.js"></script>
+  </body>
+</html>

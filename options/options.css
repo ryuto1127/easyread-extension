@@ -1,0 +1,96 @@
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.45 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  background: #f2f6fb;
+  color: #1f2937;
+}
+
+.wrap {
+  max-width: 760px;
+  margin: 20px auto;
+  padding: 0 16px 24px;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 28px;
+}
+
+h2 {
+  margin: 0 0 14px;
+  font-size: 18px;
+}
+
+p {
+  margin: 0 0 18px;
+  color: #475569;
+}
+
+.card {
+  background: white;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.field span {
+  font-weight: 600;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 9px 10px;
+  font: inherit;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+button {
+  border: 1px solid #0f766e;
+  background: #ffffff;
+  color: #0f766e;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font: 600 13px/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  cursor: pointer;
+}
+
+button.primary {
+  background: #0f766e;
+  color: #ffffff;
+}
+
+#status {
+  color: #475569;
+  font-size: 12px;
+}
