@@ -8,4 +8,4 @@ No browsing history, personal identity information, or persistent user data is s
 
 The data is used only to generate the explanation and is not sold or shared with third parties.
 
-Contact: your-email@example.com
+Contact: ryuto.2007.11.27@gmail.com
