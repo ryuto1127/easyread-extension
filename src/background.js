@@ -16,7 +16,7 @@ import {
   saveSettings
 } from "./lib/storage.js";
 
-const DEFAULT_PROXY_BASE_URL = "http://localhost:8787";
+const DEFAULT_PROXY_BASE_URL = "https://easyread-extension.onrender.com";
 const PROXY_EXPLAIN_PATH = "/api/explain";
 const CONTEXT_MENU_ID = "easyread_explain";
 const MAX_A2_CANDIDATES = 80;
