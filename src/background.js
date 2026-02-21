@@ -250,12 +250,17 @@ async function handleExplainRequest(payload, sender) {
   }
 
   if (isFastSingleCallPath && inflightRequests.has(cacheKey)) {
-    const sharedResult = await inflightRequests.get(cacheKey);
+    const sharedWork = await inflightRequests.get(cacheKey);
+    const sharedResult = ensureNonEmptyExplanation(
+      sharedWork?.result,
+      selectedText,
+      "EasyRead filled a backup explanation because shared output was empty."
+    );
     return {
       cached: false,
       result: sharedResult,
       requestId,
-      wordsPending: false,
+      wordsPending: Boolean(sharedWork?.wordsPending),
       explanationMode
     };
   }
@@ -1117,6 +1122,19 @@ async function callModelForEasyRead({
     }
     try {
       const parsed = parseAndNormalizeResponse(singleRawText);
+      if (shouldRetryForMissingExplanation(parsed, correctionHint)) {
+        return callModelForEasyRead({
+          clientId,
+          model,
+          selectedTextLength,
+          selectedTextForFallback,
+          userPrompt,
+          explanationMode,
+          correctionHint:
+            "simple_explanation was empty. Return non-empty simple_explanation with at least 2 clear sentences in easy words.",
+          singleAttempt: false
+        });
+      }
       if (isExplanationTooCloseToSource(parsed.simple_explanation, selectedTextForFallback)) {
         return callModelForEasyRead({
           clientId,
@@ -1182,6 +1200,18 @@ async function callModelForEasyRead({
 
   try {
     const parsed = parseAndNormalizeResponse(rawText);
+    if (shouldRetryForMissingExplanation(parsed, correctionHint)) {
+      return callModelForEasyRead({
+        clientId,
+        model,
+        selectedTextLength,
+        selectedTextForFallback,
+        userPrompt,
+        explanationMode,
+        correctionHint:
+          "simple_explanation was empty. Return non-empty simple_explanation with at least 2 clear sentences in easy words."
+      });
+    }
     if (isExplanationTooCloseToSource(parsed.simple_explanation, selectedTextForFallback)) {
       if (!correctionHintIncludesNoCopy(correctionHint)) {
         return callModelForEasyRead({
@@ -1208,6 +1238,12 @@ async function callModelForEasyRead({
       rawText
     });
     if (repaired) {
+      if (!hasText(repaired.simple_explanation)) {
+        return buildLocalFallbackResult(
+          selectedTextForFallback,
+          "EasyRead used fallback mode because the model returned empty explanation text."
+        );
+      }
       if (isExplanationTooCloseToSource(repaired.simple_explanation, selectedTextForFallback)) {
         return buildLocalFallbackResult(
           selectedTextForFallback,
@@ -1230,6 +1266,18 @@ async function callModelForEasyRead({
       if (expandedRawText) {
         try {
           const expandedParsed = parseAndNormalizeResponse(expandedRawText);
+          if (shouldRetryForMissingExplanation(expandedParsed, correctionHint)) {
+            return callModelForEasyRead({
+              clientId,
+              model,
+              selectedTextLength,
+              selectedTextForFallback,
+              userPrompt,
+              explanationMode,
+              correctionHint:
+                "simple_explanation was empty. Return non-empty simple_explanation with at least 2 clear sentences in easy words."
+            });
+          }
           if (isExplanationTooCloseToSource(expandedParsed.simple_explanation, selectedTextForFallback)) {
             if (!correctionHintIncludesNoCopy(correctionHint)) {
               return callModelForEasyRead({
@@ -1256,6 +1304,12 @@ async function callModelForEasyRead({
             rawText: expandedRawText
           });
           if (expandedRepaired) {
+            if (!hasText(expandedRepaired.simple_explanation)) {
+              return buildLocalFallbackResult(
+                selectedTextForFallback,
+                "EasyRead used fallback mode because the model returned empty explanation text."
+              );
+            }
             return expandedRepaired;
           }
           rawText = expandedRawText;
@@ -1590,6 +1644,15 @@ function buildLocalFallbackExplanation(selectedText) {
 
 function correctionHintIncludesNoCopy(correctionHint) {
   return String(correctionHint || "").toLowerCase().includes("do not copy");
+}
+
+function correctionHintIncludesMissingExplanation(correctionHint) {
+  const lower = String(correctionHint || "").toLowerCase();
+  return lower.includes("simple_explanation was empty") || lower.includes("non-empty simple_explanation");
+}
+
+function shouldRetryForMissingExplanation(parsed, correctionHint) {
+  return !hasText(parsed?.simple_explanation) && !correctionHintIncludesMissingExplanation(correctionHint);
 }
 
 function isExplanationTooCloseToSource(explanation, selectedText) {

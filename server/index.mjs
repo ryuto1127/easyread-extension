@@ -3,7 +3,12 @@ import { URL } from "node:url";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const MAX_BODY_BYTES = 512 * 1024;
-const ALLOWED_MODELS = new Set(["gpt-5-nano", "gpt-5-mini"]);
+const DEFAULT_ALLOWED_MODELS = ["gpt-5-nano", "gpt-5-mini"];
+const ALLOWED_MODELS = new Set(
+  splitCsv(process.env.ALLOWED_MODELS).length > 0
+    ? splitCsv(process.env.ALLOWED_MODELS)
+    : DEFAULT_ALLOWED_MODELS
+);
 const RENDER_BASE_URL = "https://easyread-extension.onrender.com";
 
 const config = {

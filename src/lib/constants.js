@@ -1,7 +1,7 @@
 export const SETTINGS_KEY = "easyread_settings_v1";
 export const CACHE_KEY = "easyread_cache_v1";
 export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-export const MODEL_VERSION = "easyread-mvp-2026-04";
+export const MODEL_VERSION = "easyread-mvp-2026-05";
 
 export const DEFAULT_SETTINGS = {
   anonymousClientId: ""
