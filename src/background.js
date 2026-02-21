@@ -235,9 +235,14 @@ async function handleExplainRequest(payload, sender) {
 
   const cached = await getCachedResponse(cacheKey);
   if (cached) {
+    const safeCached = ensureNonEmptyExplanation(
+      cached,
+      selectedText,
+      "EasyRead filled a backup explanation because cached output was empty."
+    );
     return {
       cached: true,
-      result: cached,
+      result: safeCached,
       requestId,
       wordsPending: false,
       explanationMode
@@ -276,6 +281,11 @@ async function handleExplainRequest(payload, sender) {
       }
 
       const easyParsed = enforceEasyLanguage(parsed, selectedText);
+      const safeParsed = ensureNonEmptyExplanation(
+        easyParsed,
+        selectedText,
+        "EasyRead filled a backup explanation because the model returned empty text."
+      );
       await saveCachedResponse(
         cacheKey,
         {
@@ -283,11 +293,11 @@ async function handleExplainRequest(payload, sender) {
           explanationMode,
           model: selectedModel
         },
-        easyParsed
+        safeParsed
       );
 
       return {
-        result: easyParsed,
+        result: safeParsed,
         wordsPending: false
       };
     }
@@ -306,8 +316,13 @@ async function handleExplainRequest(payload, sender) {
       },
       selectedText
     );
+    const safeImmediateResult = ensureNonEmptyExplanation(
+      immediateResult,
+      selectedText,
+      "EasyRead filled a backup explanation because the model returned empty text."
+    );
 
-    if (!isOutputUsable(immediateResult)) {
+    if (!isOutputUsable(safeImmediateResult)) {
       throw new EasyReadError("Model output is empty. Please try again.", "EMPTY_RESULT");
     }
 
@@ -319,10 +334,10 @@ async function handleExplainRequest(payload, sender) {
           explanationMode,
           model: selectedModel
         },
-        immediateResult
+        safeImmediateResult
       );
       return {
-        result: immediateResult,
+        result: safeImmediateResult,
         wordsPending: false
       };
     }
@@ -335,12 +350,12 @@ async function handleExplainRequest(payload, sender) {
       clientId,
       model: selectedModel,
       explanationMode,
-      baseResult: immediateResult,
+      baseResult: safeImmediateResult,
       cacheKey
     });
 
     return {
-      result: immediateResult,
+      result: safeImmediateResult,
       wordsPending: true
     };
   })();
@@ -429,6 +444,28 @@ function isRecoverableModelOutputError(error) {
     return true;
   }
   return false;
+}
+
+function ensureNonEmptyExplanation(result, selectedText, fallbackNote = "") {
+  const base = result && typeof result === "object" ? { ...result } : {};
+  if (hasText(base.simple_explanation)) {
+    return base;
+  }
+
+  base.simple_explanation = buildLocalFallbackExplanation(selectedText);
+  base.notes = appendNote(
+    base.notes,
+    fallbackNote || "EasyRead used backup explanation because model output was empty."
+  );
+  if (typeof base.confidence !== "number" || !Number.isFinite(base.confidence)) {
+    base.confidence = 0.35;
+  } else {
+    base.confidence = Math.min(base.confidence, 0.35);
+  }
+  if (!Array.isArray(base.a2_plus_words)) {
+    base.a2_plus_words = [];
+  }
+  return base;
 }
 
 function getPageOrigin(pageUrl, fallbackOrigin) {
@@ -1371,6 +1408,11 @@ async function runDeferredWordsPass({
       },
       selectedText
     );
+    const safeFinalResult = ensureNonEmptyExplanation(
+      finalResult,
+      selectedText,
+      "EasyRead filled a backup explanation because the model returned empty text."
+    );
 
     await saveCachedResponse(
       cacheKey,
@@ -1379,7 +1421,7 @@ async function runDeferredWordsPass({
         explanationMode,
         model
       },
-      finalResult
+      safeFinalResult
     );
 
     if (Number.isInteger(tabId)) {
@@ -1387,7 +1429,7 @@ async function runDeferredWordsPass({
         type: "easyread-words-update",
         requestId,
         explanationMode,
-        result: finalResult
+        result: safeFinalResult
       });
     }
   } catch (_error) {
