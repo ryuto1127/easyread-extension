@@ -6,7 +6,7 @@ import {
   extractOutputText,
   isOutputUsable
 } from "./lib/schema.js";
-import { extractA2PlusCandidates, findHardWords, isSimpleEnough } from "./lib/simplicity.js";
+import { extractA2PlusCandidates, findHardWords } from "./lib/simplicity.js";
 import {
   clearCache,
   getCachedResponse,
@@ -54,6 +54,26 @@ const EXPLANATION_ONLY_SCHEMA = {
       maximum: 1
     }
   }
+};
+const EASY_WORD_REPLACEMENTS = {
+  details: "small things",
+  closely: "very carefully",
+  emulated: "copied",
+  hometown: "home town",
+  souvenir: "gift",
+  emblazoned: "with words on it",
+  slogans: "short words",
+  stationery: "paper and pens",
+  bearing: "with",
+  likeness: "face",
+  alongside: "next to",
+  political: "government",
+  idol: "hero",
+  former: "past",
+  minister: "leader",
+  confidence: "clear sign",
+  detected: "found",
+  incomplete: "not done"
 };
 
 const CORE_SYSTEM_PROMPT = `
@@ -1162,7 +1182,7 @@ function enforceEasyLanguage(result, selectedText) {
   const normalized = {
     simple_explanation: simplifyToEasyText(base.simple_explanation, selectedText),
     a2_plus_words: Array.isArray(base.a2_plus_words) ? base.a2_plus_words : [],
-    notes: simplifyToEasyText(base.notes || "", ""),
+    notes: simplifyNoteText(base.notes || ""),
     confidence: typeof base.confidence === "number" ? base.confidence : 0.5
   };
 
@@ -1174,20 +1194,6 @@ function enforceEasyLanguage(result, selectedText) {
       simplifyToEasyText(item?.example_simple || "", "") || "I see this word here."
   }));
 
-  if (!isSimpleEnough(normalized, A1_A2_WORD_SET).isValid) {
-    normalized.simple_explanation = buildLocalFallbackExplanation(selectedText);
-    normalized.notes = simplifyToEasyText(
-      "EasyRead could not make a full easy answer. It gives a short easy answer now.",
-      ""
-    );
-    normalized.a2_plus_words = normalized.a2_plus_words.map((item) => ({
-      ...item,
-      definition_simple: "This word is not easy.",
-      example_simple: "I see this word here."
-    }));
-    normalized.confidence = Math.min(normalized.confidence, 0.35);
-  }
-
   return normalized;
 }
 
@@ -1197,29 +1203,54 @@ function simplifyToEasyText(text, selectedText) {
     return "";
   }
 
-  let simplified = raw;
-  const hardWords = findHardWords(simplified, A1_A2_WORD_SET);
-  for (const hardWord of hardWords) {
-    const pattern = new RegExp(`\\b${escapeRegExp(hardWord)}\\b`, "gi");
-    simplified = simplified.replace(pattern, "word");
-  }
-
-  simplified = simplified.replace(/\bword(?:\s+word){1,}\b/gi, "word");
+  let simplified = applyEasyWordReplacements(raw);
   simplified = simplified.replace(/\s+/g, " ").trim();
 
   if (!simplified) {
     return "";
   }
 
-  if (findHardWords(simplified, A1_A2_WORD_SET).length === 0) {
-    return simplified;
+  const hardCount = findHardWords(simplified, A1_A2_WORD_SET).length;
+  if (hardCount > 14) {
+    if (selectedText) {
+      return buildLocalFallbackExplanation(selectedText);
+    }
+    return "This text is about people and events.";
   }
 
-  if (selectedText) {
-    return buildLocalFallbackExplanation(selectedText);
+  return simplified;
+}
+
+function simplifyNoteText(note) {
+  const raw = String(note || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const lower = raw.toLowerCase();
+
+  if (
+    lower.includes("cut off") ||
+    lower.includes("incomplete") ||
+    lower.includes("json") ||
+    lower.includes("fallback")
+  ) {
+    return "EasyRead had a model problem. This is a short backup answer.";
+  }
+  if (lower.includes("no words above b1")) {
+    return "EasyRead did not find clear hard words above B1.";
   }
 
-  return "EasyRead gives a short easy answer.";
+  return simplifyToEasyText(raw, "");
+}
+
+function applyEasyWordReplacements(text) {
+  let result = String(text || "");
+  const entries = Object.entries(EASY_WORD_REPLACEMENTS).sort((a, b) => b[0].length - a[0].length);
+  for (const [hardWord, easyWord] of entries) {
+    const pattern = new RegExp(`\\b${escapeRegExp(hardWord)}\\b`, "gi");
+    result = result.replace(pattern, easyWord);
+  }
+  return result;
 }
 
 function escapeRegExp(value) {
@@ -1253,7 +1284,7 @@ function isMaxOutputTokensIncomplete(response) {
 }
 
 function buildLocalFallbackResult(selectedText, fallbackNote = "") {
-  const note = simplifyToEasyText(String(fallbackNote || "").trim(), "");
+  const note = simplifyNoteText(String(fallbackNote || "").trim());
   return {
     simple_explanation: buildLocalFallbackExplanation(selectedText),
     a2_plus_words: [],
@@ -1271,19 +1302,13 @@ function buildLocalFallbackExplanation(selectedText) {
     return "EasyRead could not read this text.";
   }
 
-  const tokens = normalized.match(/[A-Za-z]+(?:'[A-Za-z]+)?|[0-9]+/g) || [];
-  const easyTokens = [];
-  for (const token of tokens) {
-    if (easyTokens.length >= 38) {
-      break;
-    }
-    if (findHardWords(token, A1_A2_WORD_SET).length === 0) {
-      easyTokens.push(token.toLowerCase());
-    }
-  }
+  const sentenceParts = normalized.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const rawSummary =
+    sentenceParts.length > 0 ? sentenceParts.slice(0, 2).join(" ").trim() : normalized.slice(0, 320).trim();
+  const simplifiedSummary = simplifyToEasyText(rawSummary, "");
 
-  if (easyTokens.length >= 8) {
-    return `This text is about ${easyTokens.join(" ")}.`;
+  if (simplifiedSummary) {
+    return simplifiedSummary.length > 420 ? `${simplifiedSummary.slice(0, 420).trim()}...` : simplifiedSummary;
   }
 
   return "This text has hard words. Please choose a short part.";
