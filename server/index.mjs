@@ -3,12 +3,12 @@ import { URL } from "node:url";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const MAX_BODY_BYTES = 512 * 1024;
+const ALLOWED_MODELS = new Set(["gpt-5-nano", "gpt-5-mini"]);
 
 const config = {
   port: toInt(process.env.PORT, 8787),
   openAiKey: process.env.OPENAI_API_KEY || "",
   allowedExtensionIds: splitCsv(process.env.ALLOWED_EXTENSION_IDS),
-  allowedModels: splitCsv(process.env.ALLOWED_MODELS),
   rateWindowMs: toInt(process.env.RATE_LIMIT_WINDOW_MS, 60_000),
   rateWindowMax: toInt(process.env.RATE_LIMIT_MAX_PER_WINDOW, 20),
   rateDayMax: toInt(process.env.RATE_LIMIT_MAX_PER_DAY, 300)
@@ -84,10 +84,12 @@ async function handleExplain(req, res) {
     return;
   }
 
-  if (config.allowedModels.length > 0 && !config.allowedModels.includes(String(payload.model || ""))) {
-    sendJson(res, 400, { error: "Model is not allowed" });
+  const model = String(payload.model || "").trim();
+  if (!ALLOWED_MODELS.has(model)) {
+    sendJson(res, 400, { error: "Model is not allowed. Use gpt-5-nano or gpt-5-mini." });
     return;
   }
+  payload.model = model;
 
   try {
     const openAiRes = await fetch(`${OPENAI_BASE_URL}/responses`, {

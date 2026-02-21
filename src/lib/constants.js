@@ -4,11 +4,7 @@ export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const MODEL_VERSION = "easyread-mvp-2026-02";
 
 export const DEFAULT_SETTINGS = {
-  proxyBaseUrl: "http://localhost:8787",
-  anonymousClientId: "",
-  model: "gpt-4.1-mini",
-  maxChars: 1400,
-  enableModeration: false
+  anonymousClientId: ""
 };
 
 export const POS_VALUES = new Set([

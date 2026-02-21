@@ -1,12 +1,12 @@
 {
-  "name": "easyread-proxy",
+  "name": "easyread-extension",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "EasyRead backend proxy for OpenAI requests",
+  "description": "EasyRead Chrome extension workspace",
   "scripts": {
-    "start": "node index.mjs",
-    "start:env": "node --env-file=.env index.mjs"
+    "start": "node server/index.mjs",
+    "start:env": "node --env-file=server/.env server/index.mjs"
   },
   "engines": {
     "node": ">=20"

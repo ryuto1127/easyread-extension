@@ -16,11 +16,18 @@ import {
   saveSettings
 } from "./lib/storage.js";
 
-const DEFAULT_PROXY_BASE_URL = "https://easyread-extension.onrender.com";
+const PROXY_BASE_URL = "https://easyread-extension.onrender.com";
 const PROXY_EXPLAIN_PATH = "/api/explain";
 const CONTEXT_MENU_ID = "easyread_explain";
-const MAX_A2_CANDIDATES = 80;
-const MAX_OUTPUT_TOKENS = 900;
+const MODEL_SHORT_TEXT = "gpt-5-nano";
+const MODEL_LONG_TEXT = "gpt-5-mini";
+const MODEL_NANO_MAX_CHARS = 1200;
+const MAX_A2_CANDIDATES = 64;
+const MAX_OUTPUT_TOKENS = 700;
+const HARD_MAX_CHARS = 12000;
+const CHUNK_THRESHOLD_CHARS = 4500;
+const CHUNK_SIZE_CHARS = 1600;
+const MAX_CHUNKS = 8;
 const inflightRequests = new Map();
 const B2_PLUS_LEVELS = new Set(["B2", "C1", "C2"]);
 const WORD_COVERAGE_SCHEMA = {
@@ -72,9 +79,9 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   });
 });
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "easyread-explain") {
-    handleExplainRequest(message.payload || {}, sender)
+    handleExplainRequest(message.payload || {})
       .then((data) => sendResponse({ ok: true, data }))
       .catch((error) => sendResponse({ ok: false, error: toUserErrorMessage(error) }));
     return true;
@@ -111,21 +118,21 @@ async function handleExplainRequest(payload) {
   if (!selectedText) {
     throw new EasyReadError("Please select text first.", "NO_SELECTION");
   }
-  if (selectedText.length > settings.maxChars) {
+  if (selectedText.length > HARD_MAX_CHARS) {
     throw new EasyReadError(
-      `Selection is too long (${selectedText.length} chars). Max is ${settings.maxChars}.`,
+      `Selection is too long (${selectedText.length} chars). Max is ${HARD_MAX_CHARS}.`,
       "SELECTION_TOO_LONG"
     );
   }
-
-  const proxyBaseUrl = getProxyBaseUrl(settings.proxyBaseUrl);
+  const shouldChunkLongText = selectedText.length > CHUNK_THRESHOLD_CHARS;
+  const selectedModel = chooseModelForText(selectedText.length);
   const clientId = await getOrCreateAnonymousClientId(settings);
 
   const pageOrigin = getPageOrigin(payload.pageUrl, payload.pageOrigin);
   const cacheKey = await buildCacheKey({
     pageOrigin,
     selectedText,
-    model: settings.model,
+    model: selectedModel,
     modelVersion: MODEL_VERSION
   });
 
@@ -137,20 +144,6 @@ async function handleExplainRequest(payload) {
     };
   }
 
-  if (settings.enableModeration) {
-    const inputModeration = await moderateText({
-      proxyBaseUrl,
-      clientId,
-      text: selectedText
-    });
-    if (inputModeration.flagged) {
-      throw new EasyReadError(
-        "This text cannot be processed due to safety policy.",
-        "INPUT_MODERATED"
-      );
-    }
-  }
-
   if (inflightRequests.has(cacheKey)) {
     const sharedResult = await inflightRequests.get(cacheKey);
     return {
@@ -160,43 +153,23 @@ async function handleExplainRequest(payload) {
   }
 
   const workPromise = (async () => {
-    const candidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
-    const primaryPrompt = buildUserPrompt({
-      selectedText,
-      candidates
-    });
+    const analyzed = shouldChunkLongText
+      ? await analyzeLongSelection({
+          selectedText,
+          clientId,
+          model: selectedModel
+        })
+      : await analyzeSingleSelection({
+          selectedText,
+          clientId,
+          model: selectedModel
+        });
+    const { parsed, candidateCount } = analyzed;
 
-    let parsed = await callModelForEasyRead({
-      proxyBaseUrl,
-      clientId,
-      model: settings.model,
-      userPrompt: primaryPrompt
-    });
-
-    parsed.a2_plus_words = keepB2PlusWords(parsed.a2_plus_words);
-
-    const needsSupplementalWords = shouldRunSupplementalWordPass({
-      currentWords: parsed.a2_plus_words,
-      candidateCount: candidates.length,
-      selectedTextLength: selectedText.length
-    });
-
-    if (needsSupplementalWords) {
-      const supplemental = await callModelForB2PlusWords({
-        proxyBaseUrl,
-        clientId,
-        model: settings.model,
-        selectedText,
-        candidateHints: candidates
-      });
-      if (supplemental.length > 0) {
-        parsed.a2_plus_words = mergeWordEntries(parsed.a2_plus_words, supplemental);
-        parsed.a2_plus_words = keepB2PlusWords(parsed.a2_plus_words);
-      }
-    }
-
-    if (parsed.a2_plus_words.length === 0 && candidates.length > 0) {
-      const note = "No words above B1 were detected with enough confidence.";
+    if (parsed.a2_plus_words.length === 0 && candidateCount > 0) {
+      const note = shouldChunkLongText
+        ? "Large text mode: no words above B1 were detected with enough confidence."
+        : "No words above B1 were detected with enough confidence.";
       parsed.notes = parsed.notes ? `${parsed.notes} ${note}` : note;
     }
 
@@ -204,27 +177,11 @@ async function handleExplainRequest(payload) {
       throw new EasyReadError("Model output is empty. Please try again.", "EMPTY_RESULT");
     }
 
-    if (settings.enableModeration) {
-      const outputModeration = await moderateText(
-        {
-          proxyBaseUrl,
-          clientId,
-          text: `${parsed.simple_explanation}\n${parsed.notes || ""}`
-        }
-      );
-      if (outputModeration.flagged) {
-        throw new EasyReadError(
-          "The generated result was blocked by safety policy. Try a different selection.",
-          "OUTPUT_MODERATED"
-        );
-      }
-    }
-
     await saveCachedResponse(
       cacheKey,
       {
         selectedText,
-        model: settings.model
+        model: selectedModel
       },
       parsed
     );
@@ -277,6 +234,173 @@ async function sha256(input) {
   const digest = await crypto.subtle.digest("SHA-256", encoded);
   const bytes = new Uint8Array(digest);
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function chooseModelForText(textLength) {
+  return textLength > MODEL_NANO_MAX_CHARS ? MODEL_LONG_TEXT : MODEL_SHORT_TEXT;
+}
+
+async function analyzeSingleSelection({
+  selectedText,
+  clientId,
+  model,
+  allowSupplemental = true
+}) {
+  const candidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
+  const primaryPrompt = buildUserPrompt({
+    selectedText,
+    candidates
+  });
+
+  let parsed = await callModelForEasyRead({
+    clientId,
+    model,
+    userPrompt: primaryPrompt
+  });
+
+  parsed.a2_plus_words = keepB2PlusWords(parsed.a2_plus_words);
+
+  const needsSupplementalWords = shouldRunSupplementalWordPass({
+    currentWords: parsed.a2_plus_words,
+    candidateCount: candidates.length,
+    selectedTextLength: selectedText.length
+  });
+
+  if (allowSupplemental && needsSupplementalWords) {
+    const supplemental = await callModelForB2PlusWords({
+      clientId,
+      model,
+      selectedText,
+      candidateHints: candidates
+    });
+    if (supplemental.length > 0) {
+      parsed.a2_plus_words = mergeWordEntries(parsed.a2_plus_words, supplemental);
+      parsed.a2_plus_words = keepB2PlusWords(parsed.a2_plus_words);
+    }
+  }
+
+  return {
+    parsed,
+    candidateCount: candidates.length
+  };
+}
+
+async function analyzeLongSelection({ selectedText, clientId, model }) {
+  const chunks = splitTextIntoChunks(selectedText, CHUNK_SIZE_CHARS, MAX_CHUNKS);
+  if (chunks.length <= 1) {
+    return analyzeSingleSelection({
+      selectedText,
+      clientId,
+      model
+    });
+  }
+
+  const chunkResults = [];
+  for (const chunkText of chunks) {
+    const chunkAnalyzed = await analyzeSingleSelection({
+      selectedText: chunkText,
+      clientId,
+      model,
+      allowSupplemental: false
+    });
+    chunkResults.push(chunkAnalyzed.parsed);
+  }
+
+  const merged = mergeChunkResults(chunkResults, chunks.length);
+  const fullCandidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
+  if (fullCandidates.length > 0) {
+    const supplemental = await callModelForB2PlusWords({
+      clientId,
+      model,
+      selectedText,
+      candidateHints: fullCandidates
+    });
+    if (supplemental.length > 0) {
+      merged.a2_plus_words = mergeWordEntries(merged.a2_plus_words, supplemental);
+      merged.a2_plus_words = keepB2PlusWords(merged.a2_plus_words);
+    }
+  }
+
+  return {
+    parsed: merged,
+    candidateCount: fullCandidates.length
+  };
+}
+
+function splitTextIntoChunks(text, targetChars, maxChunks) {
+  const normalized = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const words = normalized.split(" ");
+  const chunks = [];
+  let current = "";
+
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i];
+    const next = current ? `${current} ${word}` : word;
+
+    if (next.length > targetChars && current) {
+      chunks.push(current);
+      current = word;
+
+      if (chunks.length >= maxChunks - 1) {
+        const rest = [current, ...words.slice(i + 1)].join(" ").trim();
+        if (rest) {
+          chunks.push(rest);
+        }
+        return chunks;
+      }
+      continue;
+    }
+
+    current = next;
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks;
+}
+
+function mergeChunkResults(chunkResults, chunkCount) {
+  const explanationParts = [];
+  const noteSet = new Set();
+  let mergedWords = [];
+  let confidenceTotal = 0;
+  let confidenceCount = 0;
+
+  for (const item of chunkResults || []) {
+    if (hasText(item?.simple_explanation)) {
+      explanationParts.push(item.simple_explanation.trim());
+    }
+    if (hasText(item?.notes)) {
+      noteSet.add(item.notes.trim());
+    }
+    if (Array.isArray(item?.a2_plus_words) && item.a2_plus_words.length > 0) {
+      mergedWords = mergeWordEntries(mergedWords, item.a2_plus_words);
+    }
+    if (typeof item?.confidence === "number" && Number.isFinite(item.confidence)) {
+      confidenceTotal += item.confidence;
+      confidenceCount += 1;
+    }
+  }
+
+  mergedWords = keepB2PlusWords(mergedWords);
+  const baseNote = `Large text mode: analyzed in ${chunkCount} parts.`;
+  noteSet.add(baseNote);
+
+  return {
+    simple_explanation:
+      explanationParts.join("\n\n") || "EasyRead could not build a full explanation from this long text.",
+    a2_plus_words: mergedWords,
+    notes: [...noteSet].join(" "),
+    confidence: confidenceCount > 0 ? confidenceTotal / confidenceCount : 0.45
+  };
 }
 
 function buildUserPrompt({ selectedText, candidates }) {
@@ -377,14 +501,12 @@ function mergeWordEntries(existingEntries, supplementalEntries) {
 }
 
 async function callModelForB2PlusWords({
-  proxyBaseUrl,
   clientId,
   model,
   selectedText,
   candidateHints
 }) {
   const response = await requestResponsesApi({
-    proxyBaseUrl,
     clientId,
     model,
     systemPrompt: `
@@ -426,14 +548,12 @@ Rules:
 }
 
 async function callModelForEasyRead({
-  proxyBaseUrl,
   clientId,
   model,
   userPrompt,
   correctionHint = ""
 }) {
   const response = await requestResponsesApi({
-    proxyBaseUrl,
     clientId,
     model,
     systemPrompt: CORE_SYSTEM_PROMPT,
@@ -452,7 +572,6 @@ async function callModelForEasyRead({
       throw new EasyReadError("Failed to parse model output JSON.", "BAD_JSON");
     }
     return callModelForEasyRead({
-      proxyBaseUrl,
       clientId,
       model,
       userPrompt,
@@ -463,7 +582,6 @@ async function callModelForEasyRead({
 }
 
 async function requestResponsesApi({
-  proxyBaseUrl,
   clientId,
   model,
   systemPrompt,
@@ -497,7 +615,7 @@ async function requestResponsesApi({
   };
 
   try {
-    return await postResponsesPayload({ proxyBaseUrl, clientId, payload });
+    return await postResponsesPayload({ clientId, payload });
   } catch (error) {
     const schemaIssue =
       error instanceof EasyReadError &&
@@ -509,14 +627,13 @@ async function requestResponsesApi({
 
     const fallbackPayload = { ...payload };
     delete fallbackPayload.text;
-    return postResponsesPayload({ proxyBaseUrl, clientId, payload: fallbackPayload });
+    return postResponsesPayload({ clientId, payload: fallbackPayload });
   }
 }
 
-async function postResponsesPayload({ proxyBaseUrl, clientId, payload }) {
+async function postResponsesPayload({ clientId, payload }) {
   return withExponentialBackoff(async () => {
     return postProxyJson({
-      proxyBaseUrl,
       clientId,
       path: PROXY_EXPLAIN_PATH,
       body: {
@@ -551,30 +668,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function moderateText({ proxyBaseUrl, clientId, text }) {
-  try {
-    const data = await postProxyJson({
-      proxyBaseUrl,
-      clientId,
-      path: "/api/moderate",
-      body: { text }
-    });
-    return {
-      flagged: Boolean(data?.flagged)
-    };
-  } catch (_error) {
-    return { flagged: false };
-  }
-}
-
-function getProxyBaseUrl(value) {
-  const raw = String(value || DEFAULT_PROXY_BASE_URL).trim();
-  if (!raw) {
-    throw new EasyReadError("Missing API server URL in settings.", "MISSING_PROXY_URL");
-  }
-  return raw.replace(/\/+$/, "");
-}
-
 async function getOrCreateAnonymousClientId(settings) {
   if (settings.anonymousClientId) {
     return settings.anonymousClientId;
@@ -591,14 +684,14 @@ async function getOrCreateAnonymousClientId(settings) {
   return nextId;
 }
 
-function buildProxyUrl(proxyBaseUrl, path) {
-  return `${proxyBaseUrl}${path.startsWith("/") ? path : `/${path}`}`;
+function buildProxyUrl(path) {
+  return `${PROXY_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
-async function postProxyJson({ proxyBaseUrl, clientId, path, body }) {
+async function postProxyJson({ clientId, path, body }) {
   let response;
   try {
-    response = await fetch(buildProxyUrl(proxyBaseUrl, path), {
+    response = await fetch(buildProxyUrl(path), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

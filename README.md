@@ -1,11 +1,10 @@
-<<<<<<< HEAD
 # EasyRead
 
 EasyRead is a Manifest V3 Chrome extension that explains selected text in simple English for learners.
 
 ## Architecture
 
-- Extension sends selected text to your EasyRead backend.
+- Extension sends selected text to `https://easyread-extension.onrender.com`.
 - Backend calls OpenAI using your server-side API key.
 - End users do not provide their own OpenAI key.
 
@@ -17,12 +16,18 @@ EasyRead is a Manifest V3 Chrome extension that explains selected text in simple
   - Explanation (`simple_explanation`)
   - Word list above B1 (`B2/C1/C2`) with CEFR, definition, and example
 - Buttons: `Copy`, `Pin/Unpin`, `Close`
-- Local-only settings and cache (7-day TTL)
-- Optional moderation checks
+- Local-only cache (7-day TTL)
 - Explanation length auto-scales with selection length
+- Long selections are automatically processed in chunks (up to 12,000 chars)
+- Auto model routing:
+  - `gpt-5-nano` for short selections (`<= 1200` chars)
+  - `gpt-5-mini` for longer selections (`> 1200` chars)
 - Backend rate limiting (per anonymous client ID + IP)
 
 ## Backend Setup
+
+Canonical backend code is in:
+`/Users/ryuto/Documents/easyread-extension/server`
 
 1. Go to `/Users/ryuto/Documents/easyread-extension/server`.
 2. Copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
@@ -33,7 +38,15 @@ cd /Users/ryuto/Documents/easyread-extension/server
 npm run start:env
 ```
 
-By default, backend runs on `http://localhost:8787`.
+From the repo root, this also works:
+
+```bash
+cd /Users/ryuto/Documents/easyread-extension
+npm run start:env
+```
+
+If you deploy to Render, use your deployed URL (current production target:
+`https://easyread-extension.onrender.com`).
 
 ## Extension Setup (Unpacked)
 
@@ -42,16 +55,8 @@ By default, backend runs on `http://localhost:8787`.
 3. Click **Load unpacked**.
 4. Select folder:
    - `/Users/ryuto/Documents/easyread-extension`
-5. Open extension options and set `API Server URL`.
-   - local dev: `http://localhost:8787`
-   - production: your deployed backend URL
-
-## Settings
-
-- API server URL (`proxyBaseUrl`)
-- Model name (default `gpt-4.1-mini`)
-- Optional moderation toggle
-- Clear cache
+5. The extension is preconfigured. No API/model settings are needed in Options.
+6. Options page only provides `Clear Cache`.
 
 ## Security Notes
 
@@ -61,7 +66,7 @@ By default, backend runs on `http://localhost:8787`.
 
 ## Storage
 
-- `easyread_settings_v1`: extension settings (local)
+- `easyread_settings_v1`: anonymous client ID (local)
 - `easyread_cache_v1`: cached model responses keyed by hash of origin + text + model
 
 ## File Layout
@@ -80,34 +85,3 @@ By default, backend runs on `http://localhost:8787`.
 - `/Users/ryuto/Documents/easyread-extension/options/options.js`
 - `/Users/ryuto/Documents/easyread-extension/server/index.mjs`
 - `/Users/ryuto/Documents/easyread-extension/server/.env.example`
-=======
-# EasyRead Proxy Server
-
-Backend proxy for EasyRead Chrome extension.
-
-## Purpose
-
-- Keeps `OPENAI_API_KEY` on server (not in extension)
-- Proxies `/api/explain` to OpenAI Responses API
-- Proxies `/api/moderate` to OpenAI Moderations API
-- Applies anonymous rate limits
-
-## Run
-
-```bash
-cd /Users/ryuto/Documents/easyread-extension/server
-cp .env.example .env
-# set OPENAI_API_KEY in .env
-npm run start:env
-```
-
-## Environment variables
-
-- `OPENAI_API_KEY` (required)
-- `PORT` (default `8787`)
-- `ALLOWED_EXTENSION_IDS` (optional CSV)
-- `ALLOWED_MODELS` (optional CSV)
-- `RATE_LIMIT_WINDOW_MS` (default `60000`)
-- `RATE_LIMIT_MAX_PER_WINDOW` (default `20`)
-- `RATE_LIMIT_MAX_PER_DAY` (default `300`)
->>>>>>> c4478046b7e2db8c0e6e0a11a92f468cb306e421

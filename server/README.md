@@ -23,7 +23,10 @@ npm run start:env
 - `OPENAI_API_KEY` (required)
 - `PORT` (default `8787`)
 - `ALLOWED_EXTENSION_IDS` (optional CSV)
-- `ALLOWED_MODELS` (optional CSV)
 - `RATE_LIMIT_WINDOW_MS` (default `60000`)
 - `RATE_LIMIT_MAX_PER_WINDOW` (default `20`)
 - `RATE_LIMIT_MAX_PER_DAY` (default `300`)
+
+Model policy is fixed in code and only allows:
+- `gpt-5-nano`
+- `gpt-5-mini`

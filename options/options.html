@@ -9,40 +9,23 @@
   <body>
     <main class="wrap">
       <header>
-        <h1>EasyRead Settings</h1>
+        <h1>EasyRead</h1>
         <p>
-          No user API key needed. EasyRead sends selected text to your EasyRead backend, which calls OpenAI.
+          No user API key is needed. The extension always uses:
+          <code>https://easyread-extension.onrender.com</code>
+          and auto-selects model:
+          <code>gpt-5-nano</code> (short text) or <code>gpt-5-mini</code> (large text).
         </p>
       </header>
 
-      <form id="settings-form">
-        <section class="card">
-          <h2>Backend</h2>
-          <label class="field">
-            <span>API Server URL</span>
-            <input
-              id="proxyBaseUrl"
-              type="url"
-              spellcheck="false"
-              placeholder="https://easyread-api.example.com"
-            />
-          </label>
-          <label class="field">
-            <span>Model</span>
-            <input id="model" type="text" value="gpt-4.1-mini" />
-          </label>
-          <label class="check">
-            <input id="enableModeration" type="checkbox" />
-            <span>Enable moderation checks (input/output)</span>
-          </label>
-        </section>
-
+      <section class="card">
+        <h2>Cache</h2>
+        <p>Clear saved explanations if you want to force fresh results.</p>
         <div class="actions">
-          <button type="submit" class="primary">Save Settings</button>
           <button type="button" id="clearCache">Clear Cache</button>
           <span id="status" role="status" aria-live="polite"></span>
         </div>
-      </form>
+      </section>
     </main>
 
     <script type="module" src="./options.js"></script>

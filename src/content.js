@@ -4,13 +4,10 @@
   }
   window.__easyreadMounted = true;
 
-  const SETTINGS_KEY = "easyread_settings_v1";
-  const DEFAULT_SETTINGS = {
-    maxChars: 1400
-  };
+  const HARD_MAX_CHARS = 12000;
+  const CHUNK_THRESHOLD_CHARS = 4500;
 
   const state = {
-    settings: { ...DEFAULT_SETTINGS },
     selectedText: "",
     selectionRect: null,
     pinned: false,
@@ -108,27 +105,6 @@
     }
   });
 
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== "local" || !changes[SETTINGS_KEY]) {
-      return;
-    }
-    state.settings = {
-      ...DEFAULT_SETTINGS,
-      ...(changes[SETTINGS_KEY].newValue || {})
-    };
-  });
-
-  loadSettings();
-
-  function loadSettings() {
-    chrome.storage.local.get([SETTINGS_KEY], (result) => {
-      state.settings = {
-        ...DEFAULT_SETTINGS,
-        ...(result[SETTINGS_KEY] || {})
-      };
-    });
-  }
-
   function scheduleSelectionCheck() {
     if (selectionTimer) {
       clearTimeout(selectionTimer);
@@ -146,7 +122,7 @@
     }
 
     const text = selection.toString().trim();
-    if (!text || text.length > state.settings.maxChars) {
+    if (!text || text.length > HARD_MAX_CHARS) {
       if (!state.pinned) {
         explainButton.hidden = true;
       }
@@ -198,16 +174,19 @@
       showStatus("Please select text first.");
       return;
     }
-    if (selectedText.length > state.settings.maxChars) {
+    if (selectedText.length > HARD_MAX_CHARS) {
       showOverlay();
       renderError(
-        `Selection is too long (${selectedText.length} chars). Max is ${state.settings.maxChars}.`
+        `Selection is too long (${selectedText.length} chars). Max is ${HARD_MAX_CHARS}.`
       );
       return;
     }
 
     state.lastSelectionText = selectedText;
     showOverlay();
+    if (selectedText.length > CHUNK_THRESHOLD_CHARS) {
+      showStatus("Large text detected. Processing in parts...");
+    }
     setLoading(true);
 
     try {
