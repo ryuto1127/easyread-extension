@@ -57,6 +57,59 @@ const EXPLANATION_ONLY_SCHEMA = {
     }
   }
 };
+const FALLBACK_STOP_WORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "also",
+  "and",
+  "are",
+  "because",
+  "been",
+  "before",
+  "being",
+  "both",
+  "but",
+  "can",
+  "could",
+  "does",
+  "each",
+  "even",
+  "from",
+  "have",
+  "having",
+  "into",
+  "just",
+  "like",
+  "made",
+  "many",
+  "more",
+  "most",
+  "much",
+  "only",
+  "other",
+  "over",
+  "same",
+  "some",
+  "than",
+  "that",
+  "their",
+  "them",
+  "then",
+  "there",
+  "they",
+  "this",
+  "those",
+  "very",
+  "were",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "with",
+  "would"
+]);
 const EASY_WORD_REPLACEMENTS = {
   details: "small things",
   closely: "very carefully",
@@ -736,6 +789,7 @@ Rules:
 8) Every a2_plus_words item must have non-empty definition_simple and example_simple.
 9) confidence must be 0.0 to 1.0.
 10) Keep notes short, only when needed.
+11) Do not copy full sentences from the selected text. Paraphrase in easier words.
 `;
 }
 
@@ -759,6 +813,7 @@ Rules:
 3) Follow the same idea order as the selected text.
 4) Do not include word-list entries in this step.
 5) Keep notes short, only when needed.
+6) Do not copy full sentences from the selected text. Paraphrase in easier words.
 `;
 }
 
@@ -1011,18 +1066,46 @@ async function callModelForEasyRead({
   if (singleAttempt) {
     const singleRawText = extractOutputText(response);
     if (!singleRawText) {
-      return buildLocalFallbackResult(
+      return callModelForEasyRead({
+        clientId,
+        model,
+        selectedTextLength,
         selectedTextForFallback,
-        "EasyRead used fallback mode because the model response was cut off."
-      );
+        userPrompt,
+        explanationMode,
+        correctionHint:
+          "Previous answer returned no text. Return complete JSON with clear explanation now.",
+        singleAttempt: false
+      });
     }
     try {
-      return parseAndNormalizeResponse(singleRawText);
+      const parsed = parseAndNormalizeResponse(singleRawText);
+      if (isExplanationTooCloseToSource(parsed.simple_explanation, selectedTextForFallback)) {
+        return callModelForEasyRead({
+          clientId,
+          model,
+          selectedTextLength,
+          selectedTextForFallback,
+          userPrompt,
+          explanationMode,
+          correctionHint:
+            "Do not copy the selected text. Rewrite the meaning in easier words and different sentence form.",
+          singleAttempt: false
+        });
+      }
+      return parsed;
     } catch (_error) {
-      return buildLocalFallbackResult(
+      return callModelForEasyRead({
+        clientId,
+        model,
+        selectedTextLength,
         selectedTextForFallback,
-        "EasyRead used fallback mode because model JSON formatting failed."
-      );
+        userPrompt,
+        explanationMode,
+        correctionHint:
+          "Your previous answer was not valid JSON. Return JSON only, no markdown, no extra text.",
+        singleAttempt: false
+      });
     }
   }
 
@@ -1061,7 +1144,26 @@ async function callModelForEasyRead({
   }
 
   try {
-    return parseAndNormalizeResponse(rawText);
+    const parsed = parseAndNormalizeResponse(rawText);
+    if (isExplanationTooCloseToSource(parsed.simple_explanation, selectedTextForFallback)) {
+      if (!correctionHintIncludesNoCopy(correctionHint)) {
+        return callModelForEasyRead({
+          clientId,
+          model,
+          selectedTextLength,
+          selectedTextForFallback,
+          userPrompt,
+          explanationMode,
+          correctionHint:
+            "Do not copy the selected text. Rewrite the meaning in easier words and different sentence form."
+        });
+      }
+      return buildLocalFallbackResult(
+        selectedTextForFallback,
+        "EasyRead used fallback mode because the model repeated the original text."
+      );
+    }
+    return parsed;
   } catch (_error) {
     const repaired = await tryRepairResponseJson({
       clientId,
@@ -1069,6 +1171,12 @@ async function callModelForEasyRead({
       rawText
     });
     if (repaired) {
+      if (isExplanationTooCloseToSource(repaired.simple_explanation, selectedTextForFallback)) {
+        return buildLocalFallbackResult(
+          selectedTextForFallback,
+          "EasyRead used fallback mode because the model repeated the original text."
+        );
+      }
       return repaired;
     }
 
@@ -1084,7 +1192,26 @@ async function callModelForEasyRead({
       const expandedRawText = extractOutputText(expandedResponse);
       if (expandedRawText) {
         try {
-          return parseAndNormalizeResponse(expandedRawText);
+          const expandedParsed = parseAndNormalizeResponse(expandedRawText);
+          if (isExplanationTooCloseToSource(expandedParsed.simple_explanation, selectedTextForFallback)) {
+            if (!correctionHintIncludesNoCopy(correctionHint)) {
+              return callModelForEasyRead({
+                clientId,
+                model,
+                selectedTextLength,
+                selectedTextForFallback,
+                userPrompt,
+                explanationMode,
+                correctionHint:
+                  "Do not copy the selected text. Rewrite the meaning in easier words and different sentence form."
+              });
+            }
+            return buildLocalFallbackResult(
+              selectedTextForFallback,
+              "EasyRead used fallback mode because the model repeated the original text."
+            );
+          }
+          return expandedParsed;
         } catch (_expandedError) {
           const expandedRepaired = await tryRepairResponseJson({
             clientId,
@@ -1336,7 +1463,9 @@ function simplifyNoteText(note) {
     lower.includes("cut off") ||
     lower.includes("incomplete") ||
     lower.includes("json") ||
-    lower.includes("fallback")
+    lower.includes("fallback") ||
+    lower.includes("model problem") ||
+    lower.includes("backup answer")
   ) {
     return "EasyRead had a model problem. This is a short backup answer.";
   }
@@ -1406,16 +1535,100 @@ function buildLocalFallbackExplanation(selectedText) {
     return "EasyRead could not read this text.";
   }
 
-  const sentenceParts = normalized.split(/(?<=[.!?])\s+/).filter(Boolean);
-  const rawSummary =
-    sentenceParts.length > 0 ? sentenceParts.slice(0, 2).join(" ").trim() : normalized.slice(0, 320).trim();
-  const simplifiedSummary = simplifyToEasyText(rawSummary, "");
-
-  if (simplifiedSummary) {
-    return simplifiedSummary.length > 420 ? `${simplifiedSummary.slice(0, 420).trim()}...` : simplifiedSummary;
+  const keywords = extractFallbackKeywords(normalized, 6);
+  if (keywords.length >= 4) {
+    return `This text talks about ${keywords[0]}, ${keywords[1]}, ${keywords[2]}, and ${keywords[3]}. It tells what happened and why it matters.`;
+  }
+  if (keywords.length >= 2) {
+    return `This text talks about ${keywords[0]} and ${keywords[1]}. It gives key facts and the main point.`;
   }
 
   return "This text has hard words. Please choose a short part.";
+}
+
+function correctionHintIncludesNoCopy(correctionHint) {
+  return String(correctionHint || "").toLowerCase().includes("do not copy");
+}
+
+function isExplanationTooCloseToSource(explanation, selectedText) {
+  const explanationNorm = normalizeSimilarityText(explanation);
+  const sourceNorm = normalizeSimilarityText(selectedText);
+
+  if (!explanationNorm || !sourceNorm) {
+    return false;
+  }
+
+  if (explanationNorm === sourceNorm) {
+    return true;
+  }
+
+  if (explanationNorm.length >= 70 && sourceNorm.includes(explanationNorm)) {
+    return true;
+  }
+
+  const explanationTokens = explanationNorm.split(" ").filter(Boolean);
+  const sourceTokens = sourceNorm.split(" ").filter(Boolean);
+  if (explanationTokens.length < 8 || sourceTokens.length < 8) {
+    return false;
+  }
+
+  const source4Grams = buildNgramSet(sourceTokens, 4);
+  if (source4Grams.size === 0) {
+    return false;
+  }
+
+  let overlap = 0;
+  const explanation4Grams = buildNgramSet(explanationTokens, 4);
+  for (const gram of explanation4Grams) {
+    if (source4Grams.has(gram)) {
+      overlap += 1;
+    }
+  }
+  const overlapRatio = explanation4Grams.size > 0 ? overlap / explanation4Grams.size : 0;
+  return explanationTokens.length >= 20 && overlapRatio >= 0.55;
+}
+
+function normalizeSimilarityText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s']/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildNgramSet(tokens, n) {
+  const set = new Set();
+  const list = Array.isArray(tokens) ? tokens : [];
+  if (list.length < n) {
+    return set;
+  }
+  for (let i = 0; i <= list.length - n; i += 1) {
+    set.add(list.slice(i, i + n).join(" "));
+  }
+  return set;
+}
+
+function extractFallbackKeywords(text, maxCount = 6) {
+  const tokens = String(text || "")
+    .toLowerCase()
+    .match(/[a-z]+(?:'[a-z]+)?/g);
+  if (!tokens) {
+    return [];
+  }
+
+  const keywords = [];
+  const seen = new Set();
+  for (const token of tokens) {
+    if (token.length < 4 || FALLBACK_STOP_WORDS.has(token) || seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+    keywords.push(token);
+    if (keywords.length >= maxCount) {
+      break;
+    }
+  }
+  return keywords;
 }
 
 async function tryRepairResponseJson({ clientId, originalModel, rawText }) {
