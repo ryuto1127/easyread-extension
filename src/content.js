@@ -12,7 +12,8 @@
     selectionRect: null,
     pinned: false,
     lastResult: null,
-    lastSelectionText: ""
+    lastSelectionText: "",
+    currentRequestId: ""
   };
 
   const root = document.createElement("div");
@@ -102,6 +103,11 @@
     if (message?.type === "easyread-context-explain") {
       const textFromMenu = typeof message.selectionText === "string" ? message.selectionText.trim() : "";
       runExplain(textFromMenu || getSelectionText());
+      return;
+    }
+
+    if (message?.type === "easyread-words-update") {
+      handleWordsUpdate(message);
     }
   });
 
@@ -183,9 +189,11 @@
     }
 
     state.lastSelectionText = selectedText;
+    const requestId = createRequestId();
+    state.currentRequestId = requestId;
     showOverlay();
     if (selectedText.length > CHUNK_THRESHOLD_CHARS) {
-      showStatus("Large text detected. Processing in parts...");
+      showStatus("Large text detected. Creating explanation first...");
     }
     setLoading(true);
 
@@ -193,6 +201,7 @@
       const response = await sendRuntimeMessage({
         type: "easyread-explain",
         payload: {
+          requestId,
           selectedText,
           pageUrl: window.location.href,
           pageOrigin: window.location.origin
@@ -203,8 +212,14 @@
         throw new Error(response?.error || "Failed to explain the selection.");
       }
 
+      if (response.data?.requestId && response.data.requestId !== state.currentRequestId) {
+        return;
+      }
+
       state.lastResult = response.data?.result || null;
-      renderResult(state.lastResult, response.data?.cached);
+      renderResult(state.lastResult, response.data?.cached, {
+        wordsPending: Boolean(response.data?.wordsPending)
+      });
     } catch (error) {
       renderError(error.message || "Failed to explain the selection.");
     } finally {
@@ -220,32 +235,36 @@
     overlay.style.bottom = "12px";
   }
 
-  function renderResult(result, cached) {
+  function renderResult(result, cached, options = {}) {
     if (!result) {
       renderError("No result returned.");
       return;
     }
 
-    clearNode(explanationPanel);
-    clearNode(wordsPanel);
+    renderExplanation(result);
+    renderWords(result, options.wordsPending);
 
+    const confidence = typeof result.confidence === "number" ? result.confidence.toFixed(2) : "0.50";
+    const speedNote = options.wordsPending ? " • explanation ready, loading words..." : "";
+    showStatus(`${cached ? "Cache hit" : "Fresh"} • confidence ${confidence}${speedNote}`);
+  }
+
+  function renderExplanation(result) {
+    clearNode(explanationPanel);
     const explanationParts = [];
-    if (result.simple_explanation) {
+    if (result?.simple_explanation) {
       explanationParts.push(result.simple_explanation);
     }
-    if (result.notes) {
+    if (result?.notes) {
       explanationParts.push(`Note: ${result.notes}`);
     }
     explanationPanel.textContent = explanationParts.join("\n\n") || "No explanation available.";
+  }
 
-    const wordItems = (Array.isArray(result.a2_plus_words) ? result.a2_plus_words : []).filter(
-      (item) =>
-        typeof item?.definition_simple === "string" &&
-        item.definition_simple.trim() &&
-        typeof item?.example_simple === "string" &&
-        item.example_simple.trim()
-    );
+  function renderWords(result, isPending = false) {
+    clearNode(wordsPanel);
 
+    const wordItems = getRenderableWords(result?.a2_plus_words);
     if (wordItems.length > 0) {
       for (const item of wordItems) {
         const card = document.createElement("article");
@@ -272,12 +291,44 @@
         card.appendChild(ex);
         wordsPanel.appendChild(card);
       }
-    } else {
-      wordsPanel.textContent = "No words above B1 found.";
+      return;
     }
 
-    const confidence = typeof result.confidence === "number" ? result.confidence.toFixed(2) : "0.50";
-    showStatus(`${cached ? "Cache hit" : "Fresh"} • confidence ${confidence}`);
+    wordsPanel.textContent = isPending ? "Loading difficult words..." : "No words above B1 found.";
+  }
+
+  function getRenderableWords(words) {
+    return (Array.isArray(words) ? words : []).filter(
+      (item) =>
+        typeof item?.definition_simple === "string" &&
+        item.definition_simple.trim() &&
+        typeof item?.example_simple === "string" &&
+        item.example_simple.trim()
+    );
+  }
+
+  function handleWordsUpdate(message) {
+    const incomingRequestId =
+      typeof message?.requestId === "string" ? message.requestId.trim() : "";
+    if (!incomingRequestId || incomingRequestId !== state.currentRequestId) {
+      return;
+    }
+
+    if (message?.error) {
+      wordsPanel.textContent = message.error;
+      showStatus("Explanation ready • words update failed");
+      return;
+    }
+
+    const result = message?.result;
+    if (!result || typeof result !== "object") {
+      return;
+    }
+
+    state.lastResult = result;
+    renderExplanation(result);
+    renderWords(result, false);
+    showStatus("Explanation ready • words updated");
   }
 
   function renderError(message) {
@@ -333,13 +384,7 @@
     lines.push("");
     lines.push("Explanation:");
     lines.push(result.simple_explanation || "");
-    const wordItems = (Array.isArray(result.a2_plus_words) ? result.a2_plus_words : []).filter(
-      (item) =>
-        typeof item?.definition_simple === "string" &&
-        item.definition_simple.trim() &&
-        typeof item?.example_simple === "string" &&
-        item.example_simple.trim()
-    );
+    const wordItems = getRenderableWords(result.a2_plus_words);
 
     if (wordItems.length > 0) {
       lines.push("");
@@ -355,6 +400,13 @@
       lines.push(`Note: ${result.notes}`);
     }
     return lines.join("\n");
+  }
+
+  function createRequestId() {
+    if (typeof crypto?.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return `req-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   }
 
   function sendRuntimeMessage(message) {
