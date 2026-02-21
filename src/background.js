@@ -987,6 +987,111 @@ function keepB2PlusWords(entries) {
   return (entries || []).filter(isB2PlusWordEntry);
 }
 
+function buildLocalWordFallbackEntries(candidates, wordLimit = 12) {
+  const maxEntries = Math.max(1, Math.min(Number(wordLimit) || 12, 12));
+  const unique = [];
+  const seen = new Set();
+
+  for (const candidate of candidates || []) {
+    const rawWord = String(candidate || "").trim();
+    const normalized = normalizeWordKey(rawWord);
+    if (!rawWord || !normalized || normalized.length < 3 || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    unique.push({ rawWord, normalized });
+  }
+
+  if (unique.length === 0) {
+    return [];
+  }
+
+  const mapped = unique.filter(
+    (item) =>
+      typeof EASY_WORD_REPLACEMENTS[item.normalized] === "string" ||
+      typeof EASY_WORD_REPLACEMENTS[guessLemma(item.normalized)] === "string"
+  );
+  const prioritized = mapped.length > 0 ? mapped : unique;
+
+  return prioritized.slice(0, maxEntries).map((item) => {
+    const lemma = guessLemma(item.normalized);
+    const pos = guessPos(item.normalized);
+    const mappedMeaning =
+      EASY_WORD_REPLACEMENTS[item.normalized] || EASY_WORD_REPLACEMENTS[lemma] || "";
+    const easyMeaning = String(mappedMeaning || "").trim();
+
+    return {
+      word: item.rawWord,
+      lemma,
+      pos,
+      cefr: "B2",
+      definition_simple: easyMeaning
+        ? `In this text, it means ${easyMeaning}.`
+        : "This is a hard word in this text.",
+      example_simple: easyMeaning
+        ? `Here, this word means ${easyMeaning}.`
+        : "Here, this word has a hard meaning."
+    };
+  });
+}
+
+function guessLemma(word) {
+  const normalized = normalizeWordKey(word);
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.endsWith("ied") && normalized.length > 4) {
+    return `${normalized.slice(0, -3)}y`;
+  }
+  if (normalized.endsWith("ies") && normalized.length > 4) {
+    return `${normalized.slice(0, -3)}y`;
+  }
+  if (normalized.endsWith("ated") && normalized.length > 6) {
+    return normalized.slice(0, -1);
+  }
+  if (normalized.endsWith("ing") && normalized.length > 5) {
+    const stem = normalized.slice(0, -3);
+    if (/(at|it|ul|iv)$/.test(stem)) {
+      return `${stem}e`;
+    }
+    return stem;
+  }
+  if (normalized.endsWith("ed") && normalized.length > 4) {
+    const stem = normalized.slice(0, -2);
+    if (/(at|it|ul|iv)$/.test(stem)) {
+      return `${stem}e`;
+    }
+    return stem;
+  }
+  if (normalized.endsWith("es") && normalized.length > 4) {
+    return normalized.slice(0, -2);
+  }
+  if (normalized.endsWith("s") && normalized.length > 3) {
+    return normalized.slice(0, -1);
+  }
+  return normalized;
+}
+
+function guessPos(word) {
+  const normalized = normalizeWordKey(word);
+  if (!normalized) {
+    return "other";
+  }
+  if (/(ly)$/.test(normalized)) {
+    return "adv";
+  }
+  if (/(ing|ed|en|ify|ise|ize)$/.test(normalized)) {
+    return "verb";
+  }
+  if (/(ous|ful|less|able|ible|al|ic|ive|ish)$/.test(normalized)) {
+    return "adj";
+  }
+  if (/(tion|sion|ment|ness|ity|ship|ism|age|ance|ence)$/.test(normalized)) {
+    return "noun";
+  }
+  return "other";
+}
+
 function shouldRunSupplementalWordPass({ currentWords, candidateCount, selectedTextLength }) {
   if (candidateCount <= 0 || selectedTextLength < 40) {
     return false;
@@ -1458,15 +1563,25 @@ async function runDeferredWordsPass({
       });
     }
 
+    let finalWordItems = keepB2PlusWords(words);
     let finalNotes = baseResult.notes || "";
-    if (words.length === 0 && candidateList.length > 0) {
-      finalNotes = appendNote(finalNotes, "No words above B1 were detected with enough confidence.");
+    if (finalWordItems.length === 0 && candidateList.length > 0) {
+      const localBackupWords = buildLocalWordFallbackEntries(
+        candidateList,
+        getWordResultLimit(selectedText.length)
+      );
+      if (localBackupWords.length > 0) {
+        finalWordItems = localBackupWords;
+        finalNotes = appendNote(finalNotes, "EasyRead used backup word list because model word step failed.");
+      } else {
+        finalNotes = appendNote(finalNotes, "No words above B1 were detected with enough confidence.");
+      }
     }
 
     const finalResult = enforceEasyLanguage(
       {
         ...baseResult,
-        a2_plus_words: keepB2PlusWords(words),
+        a2_plus_words: finalWordItems,
         notes: finalNotes
       },
       selectedText
