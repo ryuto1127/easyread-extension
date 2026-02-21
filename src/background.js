@@ -6,7 +6,7 @@ import {
   extractOutputText,
   isOutputUsable
 } from "./lib/schema.js";
-import { extractA2PlusCandidates } from "./lib/simplicity.js";
+import { extractA2PlusCandidates, findHardWords, isSimpleEnough } from "./lib/simplicity.js";
 import {
   clearCache,
   getCachedResponse,
@@ -195,17 +195,18 @@ async function handleExplainRequest(payload, sender) {
         throw new EasyReadError("Model output is empty. Please try again.", "EMPTY_RESULT");
       }
 
+      const easyParsed = enforceEasyLanguage(parsed, selectedText);
       await saveCachedResponse(
         cacheKey,
         {
           selectedText,
           model: selectedModel
         },
-        parsed
+        easyParsed
       );
 
       return {
-        result: parsed,
+        result: easyParsed,
         wordsPending: false
       };
     }
@@ -216,10 +217,13 @@ async function handleExplainRequest(payload, sender) {
       model: selectedModel
     });
 
-    const immediateResult = {
-      ...explanationOnly.parsed,
-      a2_plus_words: []
-    };
+    const immediateResult = enforceEasyLanguage(
+      {
+        ...explanationOnly.parsed,
+        a2_plus_words: []
+      },
+      selectedText
+    );
 
     if (!isOutputUsable(immediateResult)) {
       throw new EasyReadError("Model output is empty. Please try again.", "EMPTY_RESULT");
@@ -487,7 +491,13 @@ async function analyzeExplanationOnlySelection({ selectedText, clientId, model }
     parsed = repaired;
   }
 
-  parsed.a2_plus_words = [];
+  parsed = enforceEasyLanguage(
+    {
+      ...parsed,
+      a2_plus_words: []
+    },
+    selectedText
+  );
   return {
     parsed,
     candidateCount: candidates.length,
@@ -1099,11 +1109,14 @@ async function runDeferredWordsPass({
       finalNotes = appendNote(finalNotes, "No words above B1 were detected with enough confidence.");
     }
 
-    const finalResult = {
-      ...baseResult,
-      a2_plus_words: keepB2PlusWords(words),
-      notes: finalNotes
-    };
+    const finalResult = enforceEasyLanguage(
+      {
+        ...baseResult,
+        a2_plus_words: keepB2PlusWords(words),
+        notes: finalNotes
+      },
+      selectedText
+    );
 
     await saveCachedResponse(
       cacheKey,
@@ -1144,6 +1157,75 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function enforceEasyLanguage(result, selectedText) {
+  const base = result && typeof result === "object" ? result : {};
+  const normalized = {
+    simple_explanation: simplifyToEasyText(base.simple_explanation, selectedText),
+    a2_plus_words: Array.isArray(base.a2_plus_words) ? base.a2_plus_words : [],
+    notes: simplifyToEasyText(base.notes || "", ""),
+    confidence: typeof base.confidence === "number" ? base.confidence : 0.5
+  };
+
+  normalized.a2_plus_words = normalized.a2_plus_words.map((item) => ({
+    ...item,
+    definition_simple:
+      simplifyToEasyText(item?.definition_simple || "", "") || "This word is not easy.",
+    example_simple:
+      simplifyToEasyText(item?.example_simple || "", "") || "I see this word here."
+  }));
+
+  if (!isSimpleEnough(normalized, A1_A2_WORD_SET).isValid) {
+    normalized.simple_explanation = buildLocalFallbackExplanation(selectedText);
+    normalized.notes = simplifyToEasyText(
+      "EasyRead could not make a full easy answer. It gives a short easy answer now.",
+      ""
+    );
+    normalized.a2_plus_words = normalized.a2_plus_words.map((item) => ({
+      ...item,
+      definition_simple: "This word is not easy.",
+      example_simple: "I see this word here."
+    }));
+    normalized.confidence = Math.min(normalized.confidence, 0.35);
+  }
+
+  return normalized;
+}
+
+function simplifyToEasyText(text, selectedText) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  let simplified = raw;
+  const hardWords = findHardWords(simplified, A1_A2_WORD_SET);
+  for (const hardWord of hardWords) {
+    const pattern = new RegExp(`\\b${escapeRegExp(hardWord)}\\b`, "gi");
+    simplified = simplified.replace(pattern, "word");
+  }
+
+  simplified = simplified.replace(/\bword(?:\s+word){1,}\b/gi, "word");
+  simplified = simplified.replace(/\s+/g, " ").trim();
+
+  if (!simplified) {
+    return "";
+  }
+
+  if (findHardWords(simplified, A1_A2_WORD_SET).length === 0) {
+    return simplified;
+  }
+
+  if (selectedText) {
+    return buildLocalFallbackExplanation(selectedText);
+  }
+
+  return "EasyRead gives a short easy answer.";
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function buildNoOutputReason(response) {
   const refusal = extractFirstRefusal(response);
   if (refusal) {
@@ -1171,7 +1253,7 @@ function isMaxOutputTokensIncomplete(response) {
 }
 
 function buildLocalFallbackResult(selectedText, fallbackNote = "") {
-  const note = String(fallbackNote || "").trim();
+  const note = simplifyToEasyText(String(fallbackNote || "").trim(), "");
   return {
     simple_explanation: buildLocalFallbackExplanation(selectedText),
     a2_plus_words: [],
@@ -1188,19 +1270,23 @@ function buildLocalFallbackExplanation(selectedText) {
   if (!normalized) {
     return "EasyRead could not read this text.";
   }
-  if (normalized.length <= 320) {
-    return normalized;
-  }
 
-  const sentenceParts = normalized.split(/(?<=[.!?])\s+/).filter(Boolean);
-  if (sentenceParts.length > 0) {
-    const summary = sentenceParts.slice(0, 3).join(" ").trim();
-    if (summary) {
-      return summary.length > 520 ? `${summary.slice(0, 520).trim()}...` : summary;
+  const tokens = normalized.match(/[A-Za-z]+(?:'[A-Za-z]+)?|[0-9]+/g) || [];
+  const easyTokens = [];
+  for (const token of tokens) {
+    if (easyTokens.length >= 38) {
+      break;
+    }
+    if (findHardWords(token, A1_A2_WORD_SET).length === 0) {
+      easyTokens.push(token.toLowerCase());
     }
   }
 
-  return `${normalized.slice(0, 520).trim()}...`;
+  if (easyTokens.length >= 8) {
+    return `This text is about ${easyTokens.join(" ")}.`;
+  }
+
+  return "This text has hard words. Please choose a short part.";
 }
 
 async function tryRepairResponseJson({ clientId, originalModel, rawText }) {
