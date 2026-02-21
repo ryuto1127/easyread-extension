@@ -27,12 +27,14 @@ const MODEL_NANO_MAX_CHARS = 1200;
 const MAX_A2_CANDIDATES = 48;
 const MAX_OUTPUT_TOKENS = 1200;
 const MAX_OUTPUT_TOKENS_RETRY = 2000;
+const MAX_EXPLAIN_ATTEMPTS = 2;
 const HARD_MAX_CHARS = 12000;
 const CHUNK_THRESHOLD_CHARS = 4500;
 const CHUNK_SIZE_CHARS = 1600;
 const MAX_CHUNKS = 8;
 const MAX_CHUNK_CONCURRENCY = 2;
-const FAST_SINGLE_CALL_MAX_CHARS = 320;
+// Always return explanation first; words are loaded in a deferred pass.
+const FAST_SINGLE_CALL_MAX_CHARS = 0;
 const inflightRequests = new Map();
 const B2_PLUS_LEVELS = new Set(["B2", "C1", "C2"]);
 const WORD_COVERAGE_SCHEMA = {
@@ -1086,8 +1088,16 @@ async function callModelForEasyRead({
   userPrompt,
   explanationMode = DEFAULT_EXPLANATION_MODE,
   correctionHint = "",
-  singleAttempt = false
+  singleAttempt = false,
+  attemptCount = 1
 }) {
+  if (attemptCount > MAX_EXPLAIN_ATTEMPTS) {
+    return buildLocalFallbackResult(
+      selectedTextForFallback,
+      "EasyRead stopped after multiple retries to keep response fast."
+    );
+  }
+
   const finalPrompt = `${userPrompt}\n${correctionHint}`.trim();
   const baseTokenBudget = getOutputTokenBudget({
     model,
@@ -1117,7 +1127,8 @@ async function callModelForEasyRead({
         explanationMode,
         correctionHint:
           "Previous answer returned no text. Return complete JSON with clear explanation now.",
-        singleAttempt: false
+        singleAttempt: false,
+        attemptCount: attemptCount + 1
       });
     }
     try {
@@ -1132,7 +1143,8 @@ async function callModelForEasyRead({
           explanationMode,
           correctionHint:
             "simple_explanation was empty. Return non-empty simple_explanation with at least 2 clear sentences in easy words.",
-          singleAttempt: false
+          singleAttempt: false,
+          attemptCount: attemptCount + 1
         });
       }
       if (isExplanationTooCloseToSource(parsed.simple_explanation, selectedTextForFallback)) {
@@ -1145,7 +1157,8 @@ async function callModelForEasyRead({
           explanationMode,
           correctionHint:
             "Do not copy the selected text. Rewrite the meaning in easier words and different sentence form.",
-          singleAttempt: false
+          singleAttempt: false,
+          attemptCount: attemptCount + 1
         });
       }
       return parsed;
@@ -1159,7 +1172,8 @@ async function callModelForEasyRead({
         explanationMode,
         correctionHint:
           "Your previous answer was not valid JSON. Return JSON only, no markdown, no extra text.",
-        singleAttempt: false
+        singleAttempt: false,
+        attemptCount: attemptCount + 1
       });
     }
   }
@@ -1209,7 +1223,8 @@ async function callModelForEasyRead({
         userPrompt,
         explanationMode,
         correctionHint:
-          "simple_explanation was empty. Return non-empty simple_explanation with at least 2 clear sentences in easy words."
+          "simple_explanation was empty. Return non-empty simple_explanation with at least 2 clear sentences in easy words.",
+        attemptCount: attemptCount + 1
       });
     }
     if (isExplanationTooCloseToSource(parsed.simple_explanation, selectedTextForFallback)) {
@@ -1222,7 +1237,8 @@ async function callModelForEasyRead({
           userPrompt,
           explanationMode,
           correctionHint:
-            "Do not copy the selected text. Rewrite the meaning in easier words and different sentence form."
+            "Do not copy the selected text. Rewrite the meaning in easier words and different sentence form.",
+          attemptCount: attemptCount + 1
         });
       }
       return buildLocalFallbackResult(
@@ -1275,7 +1291,8 @@ async function callModelForEasyRead({
               userPrompt,
               explanationMode,
               correctionHint:
-                "simple_explanation was empty. Return non-empty simple_explanation with at least 2 clear sentences in easy words."
+                "simple_explanation was empty. Return non-empty simple_explanation with at least 2 clear sentences in easy words.",
+              attemptCount: attemptCount + 1
             });
           }
           if (isExplanationTooCloseToSource(expandedParsed.simple_explanation, selectedTextForFallback)) {
@@ -1288,7 +1305,8 @@ async function callModelForEasyRead({
                 userPrompt,
                 explanationMode,
                 correctionHint:
-                  "Do not copy the selected text. Rewrite the meaning in easier words and different sentence form."
+                  "Do not copy the selected text. Rewrite the meaning in easier words and different sentence form.",
+                attemptCount: attemptCount + 1
               });
             }
             return buildLocalFallbackResult(
@@ -1331,7 +1349,8 @@ async function callModelForEasyRead({
       userPrompt,
       explanationMode,
       correctionHint:
-        "Your previous answer was not valid JSON. Return JSON only, no markdown, no extra text."
+        "Your previous answer was not valid JSON. Return JSON only, no markdown, no extra text.",
+      attemptCount: attemptCount + 1
     });
   }
 }
