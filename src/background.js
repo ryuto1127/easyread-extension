@@ -6,7 +6,7 @@ import {
   extractOutputText,
   isOutputUsable
 } from "./lib/schema.js";
-import { extractA2PlusCandidates, findHardWords } from "./lib/simplicity.js";
+import { extractA2PlusCandidates } from "./lib/simplicity.js";
 import {
   clearCache,
   getCachedResponse,
@@ -21,6 +21,8 @@ const PROXY_EXPLAIN_PATH = "/api/explain";
 const CONTEXT_MENU_ID = "easyread_explain";
 const MODEL_SHORT_TEXT = "gpt-5-nano";
 const MODEL_LONG_TEXT = "gpt-5-mini";
+const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
+const DEFAULT_EXPLANATION_MODE = "balanced";
 const MODEL_NANO_MAX_CHARS = 1200;
 const MAX_A2_CANDIDATES = 48;
 const MAX_OUTPUT_TOKENS = 1200;
@@ -152,6 +154,7 @@ async function handleExplainRequest(payload, sender) {
   const settings = await getSettings();
   const selectedText = normalizeSelection(payload.selectedText);
   const requestId = normalizeRequestId(payload.requestId);
+  const explanationMode = normalizeExplanationMode(payload.explanationMode);
   const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null;
 
   if (!selectedText) {
@@ -172,6 +175,7 @@ async function handleExplainRequest(payload, sender) {
   const cacheKey = await buildCacheKey({
     pageOrigin,
     selectedText,
+    explanationMode,
     model: selectedModel,
     modelVersion: MODEL_VERSION
   });
@@ -182,7 +186,8 @@ async function handleExplainRequest(payload, sender) {
       cached: true,
       result: cached,
       requestId,
-      wordsPending: false
+      wordsPending: false,
+      explanationMode
     };
   }
 
@@ -192,7 +197,8 @@ async function handleExplainRequest(payload, sender) {
       cached: false,
       result: sharedResult,
       requestId,
-      wordsPending: false
+      wordsPending: false,
+      explanationMode
     };
   }
 
@@ -202,6 +208,7 @@ async function handleExplainRequest(payload, sender) {
         selectedText,
         clientId,
         model: selectedModel,
+        explanationMode,
         allowSupplemental: false,
         forceSingleCall: true
       });
@@ -220,6 +227,7 @@ async function handleExplainRequest(payload, sender) {
         cacheKey,
         {
           selectedText,
+          explanationMode,
           model: selectedModel
         },
         easyParsed
@@ -234,7 +242,8 @@ async function handleExplainRequest(payload, sender) {
     const explanationOnly = await analyzeExplanationOnlySelection({
       selectedText,
       clientId,
-      model: selectedModel
+      model: selectedModel,
+      explanationMode
     });
 
     const immediateResult = enforceEasyLanguage(
@@ -254,6 +263,7 @@ async function handleExplainRequest(payload, sender) {
         cacheKey,
         {
           selectedText,
+          explanationMode,
           model: selectedModel
         },
         immediateResult
@@ -271,6 +281,7 @@ async function handleExplainRequest(payload, sender) {
       candidates: explanationOnly.candidates,
       clientId,
       model: selectedModel,
+      explanationMode,
       baseResult: immediateResult,
       cacheKey
     });
@@ -290,7 +301,8 @@ async function handleExplainRequest(payload, sender) {
       cached: false,
       result: completed.result,
       requestId,
-      wordsPending: completed.wordsPending
+      wordsPending: completed.wordsPending,
+      explanationMode
     };
   } catch (error) {
     if (isRecoverableModelOutputError(error)) {
@@ -302,6 +314,7 @@ async function handleExplainRequest(payload, sender) {
         cacheKey,
         {
           selectedText,
+          explanationMode,
           model: selectedModel
         },
         fallbackResult
@@ -310,7 +323,8 @@ async function handleExplainRequest(payload, sender) {
         cached: false,
         result: fallbackResult,
         requestId,
-        wordsPending: false
+        wordsPending: false,
+        explanationMode
       };
     }
     throw error;
@@ -333,6 +347,11 @@ function normalizeRequestId(value) {
     return crypto.randomUUID();
   }
   return `req-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+}
+
+function normalizeExplanationMode(mode) {
+  const normalized = typeof mode === "string" ? mode.trim().toLowerCase() : "";
+  return EXPLANATION_MODES.has(normalized) ? normalized : DEFAULT_EXPLANATION_MODE;
 }
 
 function appendNote(base, addition) {
@@ -377,6 +396,7 @@ async function buildCacheKey(parts) {
   const serialized = [
     parts.pageOrigin || "",
     parts.selectedText || "",
+    parts.explanationMode || "",
     parts.model || "",
     parts.modelVersion || ""
   ].join("||");
@@ -398,6 +418,7 @@ async function analyzeSingleSelection({
   selectedText,
   clientId,
   model,
+  explanationMode = DEFAULT_EXPLANATION_MODE,
   allowSupplemental = true,
   forceSingleCall = false
 }) {
@@ -406,7 +427,8 @@ async function analyzeSingleSelection({
   const primaryPrompt = buildUserPrompt({
     selectedText,
     candidates,
-    wordLimit
+    wordLimit,
+    explanationMode
   });
 
   let parsed = await callModelForEasyRead({
@@ -415,6 +437,7 @@ async function analyzeSingleSelection({
     selectedTextLength: selectedText.length,
     selectedTextForFallback: selectedText,
     userPrompt: primaryPrompt,
+    explanationMode,
     singleAttempt: forceSingleCall
   });
 
@@ -446,10 +469,15 @@ async function analyzeSingleSelection({
   };
 }
 
-async function analyzeExplanationOnlySelection({ selectedText, clientId, model }) {
+async function analyzeExplanationOnlySelection({
+  selectedText,
+  clientId,
+  model,
+  explanationMode = DEFAULT_EXPLANATION_MODE
+}) {
   const candidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
-  const userPrompt = buildExplanationOnlyPrompt(selectedText);
-  const tokenBudget = getExplanationOnlyTokenBudget(selectedText.length);
+  const userPrompt = buildExplanationOnlyPrompt(selectedText, explanationMode);
+  const tokenBudget = getExplanationOnlyTokenBudget(selectedText.length, explanationMode);
 
   let response = await requestResponsesApi({
     clientId,
@@ -525,13 +553,19 @@ async function analyzeExplanationOnlySelection({ selectedText, clientId, model }
   };
 }
 
-async function analyzeLongSelection({ selectedText, clientId, model }) {
+async function analyzeLongSelection({
+  selectedText,
+  clientId,
+  model,
+  explanationMode = DEFAULT_EXPLANATION_MODE
+}) {
   const chunks = splitTextIntoChunks(selectedText, CHUNK_SIZE_CHARS, MAX_CHUNKS);
   if (chunks.length <= 1) {
     return analyzeSingleSelection({
       selectedText,
       clientId,
-      model
+      model,
+      explanationMode
     });
   }
 
@@ -543,6 +577,7 @@ async function analyzeLongSelection({ selectedText, clientId, model }) {
         selectedText: chunkText,
         clientId,
         model,
+        explanationMode,
         allowSupplemental: false
       });
       return chunkAnalyzed.parsed;
@@ -673,11 +708,15 @@ function mergeChunkResults(chunkResults, chunkCount) {
   };
 }
 
-function buildUserPrompt({ selectedText, candidates, wordLimit }) {
-  const explanationGuidance = getExplanationLengthGuidance(selectedText.length);
+function buildUserPrompt({ selectedText, candidates, wordLimit, explanationMode }) {
+  const mode = normalizeExplanationMode(explanationMode);
+  const explanationGuidance = getExplanationLengthGuidance(selectedText.length, mode);
+  const styleGuidance = getExplanationStyleGuidance(mode);
   return `
 Return JSON only that follows the schema.
 Write a useful explanation for learners.
+Requested explanation mode: ${mode}.
+${styleGuidance}
 ${explanationGuidance}
 
 Selected text:
@@ -700,11 +739,15 @@ Rules:
 `;
 }
 
-function buildExplanationOnlyPrompt(selectedText) {
-  const explanationGuidance = getExplanationLengthGuidance(selectedText.length);
+function buildExplanationOnlyPrompt(selectedText, explanationMode) {
+  const mode = normalizeExplanationMode(explanationMode);
+  const explanationGuidance = getExplanationLengthGuidance(selectedText.length, mode);
+  const styleGuidance = getExplanationStyleGuidance(mode);
   return `
 Return JSON only that follows the schema.
 Write a useful explanation for learners.
+Requested explanation mode: ${mode}.
+${styleGuidance}
 ${explanationGuidance}
 
 Selected text:
@@ -719,17 +762,54 @@ Rules:
 `;
 }
 
-function getExplanationLengthGuidance(selectionLength) {
+function getExplanationStyleGuidance(explanationMode) {
+  if (explanationMode === "simple") {
+    return "Use very easy words and short direct sentences.";
+  }
+  if (explanationMode === "detailed") {
+    return "Use clear learner-friendly words and include key details, links, and reasons from the text.";
+  }
+  return "Use easy but natural words and include enough detail for a learner to follow each main idea.";
+}
+
+function getExplanationLengthGuidance(selectionLength, explanationMode) {
+  const mode = normalizeExplanationMode(explanationMode);
+  if (mode === "simple") {
+    if (selectionLength <= 120) {
+      return "Write 2 to 3 short sentences.";
+    }
+    if (selectionLength <= 320) {
+      return "Write 3 to 4 short sentences.";
+    }
+    if (selectionLength <= 700) {
+      return "Write 4 to 5 short sentences.";
+    }
+    return "Write 5 to 6 short sentences.";
+  }
+
+  if (mode === "detailed") {
+    if (selectionLength <= 120) {
+      return "Write 3 to 4 sentences with key detail.";
+    }
+    if (selectionLength <= 320) {
+      return "Write 5 to 7 sentences.";
+    }
+    if (selectionLength <= 700) {
+      return "Write 7 to 9 sentences.";
+    }
+    return "Write 8 to 10 sentences.";
+  }
+
   if (selectionLength <= 120) {
-    return "Write 2 to 3 short sentences.";
+    return "Write 3 to 4 short sentences.";
   }
   if (selectionLength <= 320) {
-    return "Write 3 to 5 sentences.";
+    return "Write 4 to 6 sentences.";
   }
   if (selectionLength <= 700) {
-    return "Write 5 to 7 sentences.";
+    return "Write 6 to 8 sentences.";
   }
-  return "Write 6 to 8 sentences.";
+  return "Write 7 to 9 sentences.";
 }
 
 function getWordResultLimit(selectionLength) {
@@ -745,34 +825,54 @@ function getWordResultLimit(selectionLength) {
   return 24;
 }
 
-function getOutputTokenBudget({ model, selectedTextLength }) {
+function getOutputTokenBudget({ model, selectedTextLength, explanationMode = DEFAULT_EXPLANATION_MODE }) {
+  const mode = normalizeExplanationMode(explanationMode);
+  let budget;
+
   if (model === MODEL_SHORT_TEXT) {
     if (selectedTextLength <= 180) {
-      return 800;
+      budget = 800;
+    } else if (selectedTextLength <= 700) {
+      budget = 950;
+    } else {
+      budget = 1150;
     }
-    if (selectedTextLength <= 700) {
-      return 950;
-    }
-    return 1150;
+  } else if (selectedTextLength <= 700) {
+    budget = 1100;
+  } else if (selectedTextLength <= 1800) {
+    budget = 1400;
+  } else {
+    budget = 1650;
   }
 
-  if (selectedTextLength <= 700) {
-    return 1100;
+  if (mode === "simple") {
+    budget -= 120;
+  } else if (mode === "detailed") {
+    budget += 220;
   }
-  if (selectedTextLength <= 1800) {
-    return 1400;
-  }
-  return 1650;
+
+  return Math.max(650, budget);
 }
 
-function getExplanationOnlyTokenBudget(selectionLength) {
+function getExplanationOnlyTokenBudget(selectionLength, explanationMode = DEFAULT_EXPLANATION_MODE) {
+  const mode = normalizeExplanationMode(explanationMode);
+  let budget;
+
   if (selectionLength <= 320) {
-    return 700;
+    budget = 700;
+  } else if (selectionLength <= 1200) {
+    budget = 900;
+  } else {
+    budget = 1100;
   }
-  if (selectionLength <= 1200) {
-    return 900;
+
+  if (mode === "simple") {
+    budget -= 120;
+  } else if (mode === "detailed") {
+    budget += 220;
   }
-  return 1100;
+
+  return Math.max(600, budget);
 }
 
 function normalizeWordKey(word) {
@@ -887,11 +987,16 @@ async function callModelForEasyRead({
   selectedTextLength = 0,
   selectedTextForFallback = "",
   userPrompt,
+  explanationMode = DEFAULT_EXPLANATION_MODE,
   correctionHint = "",
   singleAttempt = false
 }) {
   const finalPrompt = `${userPrompt}\n${correctionHint}`.trim();
-  const baseTokenBudget = getOutputTokenBudget({ model, selectedTextLength });
+  const baseTokenBudget = getOutputTokenBudget({
+    model,
+    selectedTextLength,
+    explanationMode
+  });
   const retryTokenBudget = Math.max(baseTokenBudget, MAX_OUTPUT_TOKENS_RETRY);
 
   let response = await requestResponsesApi({
@@ -1006,6 +1111,7 @@ async function callModelForEasyRead({
       selectedTextLength,
       selectedTextForFallback,
       userPrompt,
+      explanationMode,
       correctionHint:
         "Your previous answer was not valid JSON. Return JSON only, no markdown, no extra text."
     });
@@ -1107,6 +1213,7 @@ async function runDeferredWordsPass({
   candidates,
   clientId,
   model,
+  explanationMode = DEFAULT_EXPLANATION_MODE,
   baseResult,
   cacheKey
 }) {
@@ -1142,6 +1249,7 @@ async function runDeferredWordsPass({
       cacheKey,
       {
         selectedText,
+        explanationMode,
         model
       },
       finalResult
@@ -1151,6 +1259,7 @@ async function runDeferredWordsPass({
       await sendTabUpdate(tabId, {
         type: "easyread-words-update",
         requestId,
+        explanationMode,
         result: finalResult
       });
     }
@@ -1207,15 +1316,10 @@ function simplifyToEasyText(text, selectedText) {
   simplified = simplified.replace(/\s+/g, " ").trim();
 
   if (!simplified) {
-    return "";
-  }
-
-  const hardCount = findHardWords(simplified, A1_A2_WORD_SET).length;
-  if (hardCount > 14) {
     if (selectedText) {
       return buildLocalFallbackExplanation(selectedText);
     }
-    return "This text is about people and events.";
+    return "";
   }
 
   return simplified;

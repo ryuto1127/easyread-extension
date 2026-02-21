@@ -13,7 +13,8 @@
     pinned: false,
     lastResult: null,
     lastSelectionText: "",
-    currentRequestId: ""
+    currentRequestId: "",
+    explanationMode: "balanced"
   };
 
   const root = document.createElement("div");
@@ -50,6 +51,10 @@
       </section>
     </div>
     <div class="easyread-footer">
+      <div class="easyread-mode-actions">
+        <button class="easyread-secondary-btn" type="button" data-action="mode-simple">More Simple</button>
+        <button class="easyread-secondary-btn" type="button" data-action="mode-detailed">More Detail</button>
+      </div>
       <div class="easyread-status" data-status>Ready</div>
     </div>
   `;
@@ -59,10 +64,13 @@
   const explanationPanel = overlay.querySelector('[data-panel="explanation"]');
   const wordsPanel = overlay.querySelector('[data-panel="words"]');
   const pinButton = overlay.querySelector('[data-action="pin"]');
+  const modeSimpleButton = overlay.querySelector('[data-action="mode-simple"]');
+  const modeDetailedButton = overlay.querySelector('[data-action="mode-detailed"]');
 
   let selectionTimer = null;
 
   explainButton.addEventListener("click", () => runExplain());
+  updateModeButtons();
 
   overlay.addEventListener("click", (event) => {
     const action = event.target?.getAttribute("data-action");
@@ -80,6 +88,15 @@
     }
     if (action === "copy") {
       copyLastResult();
+      return;
+    }
+    if (action === "mode-simple") {
+      rerunWithMode("simple");
+      return;
+    }
+    if (action === "mode-detailed") {
+      rerunWithMode("detailed");
+      return;
     }
   });
 
@@ -174,7 +191,11 @@
     explainButton.style.left = `${Math.round(left)}px`;
   }
 
-  async function runExplain(explicitText = "") {
+  async function runExplain(explicitText = "", options = {}) {
+    const requestedMode = normalizeExplanationMode(options.explanationMode || state.explanationMode);
+    state.explanationMode = requestedMode;
+    updateModeButtons();
+
     const selectedText = (explicitText || getSelectionText() || state.selectedText).trim();
     if (!selectedText) {
       showStatus("Please select text first.");
@@ -195,7 +216,7 @@
     if (selectedText.length > CHUNK_THRESHOLD_CHARS) {
       showStatus("Large text detected. Creating explanation first...");
     }
-    setLoading(true);
+    setLoading(true, requestedMode, Boolean(options.isRefine));
 
     try {
       const response = await sendRuntimeMessage({
@@ -204,7 +225,8 @@
           requestId,
           selectedText,
           pageUrl: window.location.href,
-          pageOrigin: window.location.origin
+          pageOrigin: window.location.origin,
+          explanationMode: requestedMode
         }
       });
 
@@ -218,7 +240,8 @@
 
       state.lastResult = response.data?.result || null;
       renderResult(state.lastResult, response.data?.cached, {
-        wordsPending: Boolean(response.data?.wordsPending)
+        wordsPending: Boolean(response.data?.wordsPending),
+        explanationMode: requestedMode
       });
     } catch (error) {
       renderError(error.message || "Failed to explain the selection.");
@@ -246,7 +269,8 @@
 
     const confidence = typeof result.confidence === "number" ? result.confidence.toFixed(2) : "0.50";
     const speedNote = options.wordsPending ? " • explanation ready, loading words..." : "";
-    showStatus(`${cached ? "Cache hit" : "Fresh"} • confidence ${confidence}${speedNote}`);
+    const modeLabel = getModeLabel(options.explanationMode || state.explanationMode);
+    showStatus(`${cached ? "Cache hit" : "Fresh"} • ${modeLabel} • confidence ${confidence}${speedNote}`);
   }
 
   function renderExplanation(result) {
@@ -326,9 +350,13 @@
     }
 
     state.lastResult = result;
+    if (message?.explanationMode) {
+      state.explanationMode = normalizeExplanationMode(message.explanationMode);
+      updateModeButtons();
+    }
     renderExplanation(result);
     renderWords(result, false);
-    showStatus("Explanation ready • words updated");
+    showStatus(`Explanation ready • ${getModeLabel(state.explanationMode)} • words updated`);
   }
 
   function renderError(message) {
@@ -339,12 +367,17 @@
     showStatus("Error");
   }
 
-  function setLoading(isLoading) {
+  function setLoading(isLoading, explanationMode = "balanced", isRefine = false) {
     if (isLoading) {
-      showStatus("Working...");
+      const modeLabel = getModeLabel(explanationMode);
+      showStatus(isRefine ? `Updating (${modeLabel})...` : `Working (${modeLabel})...`);
       explanationPanel.innerHTML = '<div class="easyread-loading">Creating explanation</div>';
       wordsPanel.textContent = "";
-    } else if (!statusEl.textContent || statusEl.textContent === "Working...") {
+    } else if (
+      !statusEl.textContent ||
+      statusEl.textContent.startsWith("Working (") ||
+      statusEl.textContent.startsWith("Updating (")
+    ) {
       showStatus("Ready");
     }
   }
@@ -419,5 +452,40 @@
         resolve(response);
       });
     });
+  }
+
+  function rerunWithMode(mode) {
+    const nextMode = normalizeExplanationMode(mode);
+    state.explanationMode = nextMode;
+    updateModeButtons();
+    const text = state.lastSelectionText || state.selectedText || getSelectionText();
+    void runExplain(text, { explanationMode: nextMode, isRefine: true });
+  }
+
+  function updateModeButtons() {
+    if (modeSimpleButton) {
+      modeSimpleButton.dataset.active = state.explanationMode === "simple" ? "true" : "false";
+    }
+    if (modeDetailedButton) {
+      modeDetailedButton.dataset.active = state.explanationMode === "detailed" ? "true" : "false";
+    }
+  }
+
+  function normalizeExplanationMode(mode) {
+    const raw = typeof mode === "string" ? mode.trim().toLowerCase() : "";
+    if (raw === "simple" || raw === "detailed" || raw === "balanced") {
+      return raw;
+    }
+    return "balanced";
+  }
+
+  function getModeLabel(mode) {
+    if (mode === "simple") {
+      return "simple";
+    }
+    if (mode === "detailed") {
+      return "detailed";
+    }
+    return "balanced";
   }
 })();
