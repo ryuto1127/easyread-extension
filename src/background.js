@@ -24,7 +24,7 @@ const MODEL_LONG_TEXT = "gpt-5-mini";
 const MODEL_NANO_MAX_CHARS = 1200;
 const MAX_A2_CANDIDATES = 48;
 const MAX_OUTPUT_TOKENS = 1200;
-const MAX_OUTPUT_TOKENS_RETRY = 1800;
+const MAX_OUTPUT_TOKENS_RETRY = 2000;
 const HARD_MAX_CHARS = 12000;
 const CHUNK_THRESHOLD_CHARS = 4500;
 const CHUNK_SIZE_CHARS = 1600;
@@ -268,6 +268,28 @@ async function handleExplainRequest(payload, sender) {
       requestId,
       wordsPending: completed.wordsPending
     };
+  } catch (error) {
+    if (isRecoverableModelOutputError(error)) {
+      const fallbackResult = buildLocalFallbackResult(
+        selectedText,
+        "EasyRead used fallback mode because the model response was incomplete."
+      );
+      await saveCachedResponse(
+        cacheKey,
+        {
+          selectedText,
+          model: selectedModel
+        },
+        fallbackResult
+      );
+      return {
+        cached: false,
+        result: fallbackResult,
+        requestId,
+        wordsPending: false
+      };
+    }
+    throw error;
   } finally {
     if (isFastSingleCallPath) {
       inflightRequests.delete(cacheKey);
@@ -296,6 +318,21 @@ function appendNote(base, addition) {
   }
   const prior = String(base || "").trim();
   return prior ? `${prior} ${next}` : next;
+}
+
+function isRecoverableModelOutputError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  const code = String(error?.code || "");
+  if (code === "EMPTY_OUTPUT" || code === "BAD_JSON") {
+    return true;
+  }
+  if (message.includes("model returned no text")) {
+    return true;
+  }
+  if (message.includes("max_output_tokens")) {
+    return true;
+  }
+  return false;
 }
 
 function getPageOrigin(pageUrl, fallbackOrigin) {
@@ -352,6 +389,7 @@ async function analyzeSingleSelection({
     clientId,
     model,
     selectedTextLength: selectedText.length,
+    selectedTextForFallback: selectedText,
     userPrompt: primaryPrompt,
     singleAttempt: forceSingleCall
   });
@@ -417,8 +455,14 @@ async function analyzeExplanationOnlySelection({ selectedText, clientId, model }
   }
 
   if (!rawText) {
-    const reason = buildNoOutputReason(response);
-    throw new EasyReadError(reason || "Model returned empty output.", "EMPTY_OUTPUT", true);
+    return {
+      parsed: buildLocalFallbackResult(
+        selectedText,
+        "EasyRead used fallback mode because the model response was cut off."
+      ),
+      candidateCount: candidates.length,
+      candidates
+    };
   }
 
   let parsed;
@@ -431,7 +475,14 @@ async function analyzeExplanationOnlySelection({ selectedText, clientId, model }
       rawText
     });
     if (!repaired) {
-      throw new EasyReadError("Failed to parse model output JSON.", "BAD_JSON");
+      return {
+        parsed: buildLocalFallbackResult(
+          selectedText,
+          "EasyRead used fallback mode because model JSON formatting failed."
+        ),
+        candidateCount: candidates.length,
+        candidates
+      };
     }
     parsed = repaired;
   }
@@ -640,15 +691,15 @@ Rules:
 
 function getExplanationLengthGuidance(selectionLength) {
   if (selectionLength <= 120) {
-    return "Write 3 to 4 short sentences.";
+    return "Write 2 to 3 short sentences.";
   }
   if (selectionLength <= 320) {
-    return "Write 5 to 7 sentences.";
+    return "Write 3 to 5 sentences.";
   }
   if (selectionLength <= 700) {
-    return "Write 7 to 10 sentences.";
+    return "Write 5 to 7 sentences.";
   }
-  return "Write 9 to 12 sentences.";
+  return "Write 6 to 8 sentences.";
 }
 
 function getWordResultLimit(selectionLength) {
@@ -804,6 +855,7 @@ async function callModelForEasyRead({
   clientId,
   model,
   selectedTextLength = 0,
+  selectedTextForFallback = "",
   userPrompt,
   correctionHint = "",
   singleAttempt = false
@@ -824,13 +876,18 @@ async function callModelForEasyRead({
   if (singleAttempt) {
     const singleRawText = extractOutputText(response);
     if (!singleRawText) {
-      const reason = buildNoOutputReason(response);
-      throw new EasyReadError(reason || "Model returned empty output.", "EMPTY_OUTPUT", true);
+      return buildLocalFallbackResult(
+        selectedTextForFallback,
+        "EasyRead used fallback mode because the model response was cut off."
+      );
     }
     try {
       return parseAndNormalizeResponse(singleRawText);
     } catch (_error) {
-      throw new EasyReadError("Failed to parse model output JSON.", "BAD_JSON");
+      return buildLocalFallbackResult(
+        selectedTextForFallback,
+        "EasyRead used fallback mode because model JSON formatting failed."
+      );
     }
   }
 
@@ -862,8 +919,10 @@ async function callModelForEasyRead({
   }
 
   if (!rawText) {
-    const reason = buildNoOutputReason(response);
-    throw new EasyReadError(reason || "Model returned empty output.", "EMPTY_OUTPUT", true);
+    return buildLocalFallbackResult(
+      selectedTextForFallback,
+      "EasyRead used fallback mode because the model response was cut off."
+    );
   }
 
   try {
@@ -906,12 +965,16 @@ async function callModelForEasyRead({
     }
 
     if (correctionHint) {
-      throw new EasyReadError("Failed to parse model output JSON.", "BAD_JSON");
+      return buildLocalFallbackResult(
+        selectedTextForFallback,
+        "EasyRead used fallback mode because model JSON formatting failed."
+      );
     }
     return callModelForEasyRead({
       clientId,
       model,
       selectedTextLength,
+      selectedTextForFallback,
       userPrompt,
       correctionHint:
         "Your previous answer was not valid JSON. Return JSON only, no markdown, no extra text."
@@ -1105,6 +1168,39 @@ function isMaxOutputTokensIncomplete(response) {
     response?.status === "incomplete" &&
     response?.incomplete_details?.reason === "max_output_tokens"
   );
+}
+
+function buildLocalFallbackResult(selectedText, fallbackNote = "") {
+  const note = String(fallbackNote || "").trim();
+  return {
+    simple_explanation: buildLocalFallbackExplanation(selectedText),
+    a2_plus_words: [],
+    notes: note,
+    confidence: 0.2
+  };
+}
+
+function buildLocalFallbackExplanation(selectedText) {
+  const normalized = String(selectedText || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) {
+    return "EasyRead could not read this text.";
+  }
+  if (normalized.length <= 320) {
+    return normalized;
+  }
+
+  const sentenceParts = normalized.split(/(?<=[.!?])\s+/).filter(Boolean);
+  if (sentenceParts.length > 0) {
+    const summary = sentenceParts.slice(0, 3).join(" ").trim();
+    if (summary) {
+      return summary.length > 520 ? `${summary.slice(0, 520).trim()}...` : summary;
+    }
+  }
+
+  return `${normalized.slice(0, 520).trim()}...`;
 }
 
 async function tryRepairResponseJson({ clientId, originalModel, rawText }) {
