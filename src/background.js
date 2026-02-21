@@ -592,7 +592,6 @@ async function requestResponsesApi({
   const payload = {
     model,
     store: false,
-    temperature: 0.2,
     max_output_tokens: MAX_OUTPUT_TOKENS,
     input: [
       {

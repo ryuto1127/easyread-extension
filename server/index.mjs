@@ -4,6 +4,7 @@ import { URL } from "node:url";
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const MAX_BODY_BYTES = 512 * 1024;
 const ALLOWED_MODELS = new Set(["gpt-5-nano", "gpt-5-mini"]);
+const RENDER_BASE_URL = "https://easyread-extension.onrender.com";
 
 const config = {
   port: toInt(process.env.PORT, 8787),
@@ -30,7 +31,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const parsedUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const requestHost = String(req.headers.host || "").trim();
+  const baseOrigin = requestHost ? `http://${requestHost}` : RENDER_BASE_URL;
+  const parsedUrl = new URL(req.url || "/", baseOrigin);
 
   if (req.method === "GET" && parsedUrl.pathname === "/api/health") {
     sendJson(res, 200, { ok: true, service: "easyread-proxy" });
@@ -51,7 +54,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(config.port, () => {
-  console.log(`EasyRead proxy listening on http://localhost:${config.port}`);
+  console.log(`EasyRead proxy listening on port ${config.port}`);
 });
 
 async function handleExplain(req, res) {
@@ -179,6 +182,10 @@ function sanitizeResponsesPayload(payload) {
 
   const next = { ...payload };
   next.store = false;
+  delete next.temperature;
+  delete next.top_p;
+  delete next.frequency_penalty;
+  delete next.presence_penalty;
 
   if (typeof next.max_output_tokens === "number") {
     next.max_output_tokens = Math.max(64, Math.min(2000, Math.floor(next.max_output_tokens)));
