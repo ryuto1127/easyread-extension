@@ -59,60 +59,9 @@ const EXPLANATION_ONLY_SCHEMA = {
     }
   }
 };
-const FALLBACK_STOP_WORDS = new Set([
-  "about",
-  "after",
-  "again",
-  "also",
-  "and",
-  "are",
-  "because",
-  "been",
-  "before",
-  "being",
-  "both",
-  "but",
-  "can",
-  "could",
-  "does",
-  "each",
-  "even",
-  "from",
-  "have",
-  "having",
-  "into",
-  "just",
-  "like",
-  "made",
-  "many",
-  "more",
-  "most",
-  "much",
-  "only",
-  "other",
-  "over",
-  "same",
-  "some",
-  "than",
-  "that",
-  "their",
-  "them",
-  "then",
-  "there",
-  "they",
-  "this",
-  "those",
-  "very",
-  "were",
-  "what",
-  "when",
-  "where",
-  "which",
-  "while",
-  "with",
-  "would"
-]);
 const EASY_WORD_REPLACEMENTS = {
+  "small details": "small things",
+  "daily life": "everyday life",
   details: "small things",
   closely: "very carefully",
   emulated: "copied",
@@ -602,6 +551,17 @@ async function analyzeExplanationOnlySelection({
     });
     rawText = extractOutputText(response);
   }
+  if (!rawText && model === MODEL_SHORT_TEXT) {
+    response = await requestResponsesApi({
+      clientId,
+      model: MODEL_LONG_TEXT,
+      systemPrompt: CORE_SYSTEM_PROMPT,
+      userPrompt,
+      useSchema: false,
+      maxOutputTokens: Math.max(tokenBudget, 900)
+    });
+    rawText = extractOutputText(response);
+  }
 
   if (!rawText) {
     return {
@@ -623,7 +583,38 @@ async function analyzeExplanationOnlySelection({
       originalModel: model,
       rawText
     });
-    if (!repaired) {
+    if (repaired) {
+      parsed = repaired;
+    } else if (model === MODEL_SHORT_TEXT) {
+      const rescuePrompt = `${userPrompt}
+Return valid JSON only. The field simple_explanation must be non-empty.`;
+      const rescueResponse = await requestResponsesApi({
+        clientId,
+        model: MODEL_LONG_TEXT,
+        systemPrompt: CORE_SYSTEM_PROMPT,
+        userPrompt: rescuePrompt,
+        useSchema: false,
+        maxOutputTokens: Math.max(tokenBudget, MAX_OUTPUT_TOKENS_RETRY)
+      });
+      const rescueRawText = extractOutputText(rescueResponse);
+
+      if (rescueRawText) {
+        try {
+          parsed = parseAndNormalizeResponse(rescueRawText);
+        } catch (_rescueParseError) {
+          const rescueRepaired = await tryRepairResponseJson({
+            clientId,
+            originalModel: MODEL_LONG_TEXT,
+            rawText: rescueRawText
+          });
+          if (rescueRepaired) {
+            parsed = rescueRepaired;
+          }
+        }
+      }
+    }
+
+    if (!parsed) {
       return {
         parsed: buildLocalFallbackResult(
           selectedText,
@@ -633,7 +624,6 @@ async function analyzeExplanationOnlySelection({
         candidates
       };
     }
-    parsed = repaired;
   }
 
   parsed = enforceEasyLanguage(
@@ -1650,15 +1640,24 @@ function buildLocalFallbackExplanation(selectedText) {
     return "EasyRead could not read this text.";
   }
 
-  const keywords = extractFallbackKeywords(normalized, 6);
-  if (keywords.length >= 4) {
-    return `This text talks about ${keywords[0]}, ${keywords[1]}, ${keywords[2]}, and ${keywords[3]}. It tells what happened and why it matters.`;
-  }
-  if (keywords.length >= 2) {
-    return `This text talks about ${keywords[0]} and ${keywords[1]}. It gives key facts and the main point.`;
+  const sentenceParts = normalized.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const sample = sentenceParts.length > 0 ? sentenceParts.slice(0, 2).join(" ").trim() : normalized;
+  let simplified = applyEasyWordReplacements(sample)
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!simplified) {
+    return "This text has hard words. Please choose a short part.";
   }
 
-  return "This text has hard words. Please choose a short part.";
+  if (simplified.length > 420) {
+    simplified = `${simplified.slice(0, 420).trim()}...`;
+  }
+  if (!/[.!?]$/.test(simplified)) {
+    simplified = `${simplified}.`;
+  }
+
+  return `Quick meaning: ${simplified}`;
 }
 
 function correctionHintIncludesNoCopy(correctionHint) {
@@ -1730,29 +1729,6 @@ function buildNgramSet(tokens, n) {
     set.add(list.slice(i, i + n).join(" "));
   }
   return set;
-}
-
-function extractFallbackKeywords(text, maxCount = 6) {
-  const tokens = String(text || "")
-    .toLowerCase()
-    .match(/[a-z]+(?:'[a-z]+)?/g);
-  if (!tokens) {
-    return [];
-  }
-
-  const keywords = [];
-  const seen = new Set();
-  for (const token of tokens) {
-    if (token.length < 4 || FALLBACK_STOP_WORDS.has(token) || seen.has(token)) {
-      continue;
-    }
-    seen.add(token);
-    keywords.push(token);
-    if (keywords.length >= maxCount) {
-      break;
-    }
-  }
-  return keywords;
 }
 
 async function tryRepairResponseJson({ clientId, originalModel, rawText }) {
