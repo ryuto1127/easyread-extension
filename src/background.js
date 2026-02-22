@@ -764,62 +764,22 @@ async function analyzeExplanationOnlySelection({
   const userPrompt = buildExplanationOnlyPrompt(selectedText, explanationMode);
   const tokenBudget = getExplanationOnlyTokenBudget(selectedText.length, explanationMode);
 
-  let response = await requestResponsesApi({
+  const response = await requestResponsesApi({
     clientId,
     model,
     systemPrompt: CORE_SYSTEM_PROMPT,
     userPrompt,
     useSchema: false,
-    maxOutputTokens: tokenBudget
-  });
+    maxOutputTokens: tokenBudget,
+    maxAttempts: 1
+  }).catch(() => null);
 
-  let rawText = extractOutputText(response);
+  const rawText = extractOutputText(response);
   if (!rawText) {
-    const fallbackBudget = isMaxOutputTokensIncomplete(response)
-      ? Math.max(tokenBudget, MAX_OUTPUT_TOKENS_RETRY)
-      : tokenBudget;
-    response = await requestResponsesApi({
-      clientId,
-      model,
-      systemPrompt: CORE_SYSTEM_PROMPT,
-      userPrompt,
-      useSchema: false,
-      maxOutputTokens: fallbackBudget
-    });
-    rawText = extractOutputText(response);
-  }
-  if (!rawText && model === MODEL_SHORT_TEXT) {
-    response = await requestResponsesApi({
-      clientId,
-      model: MODEL_LONG_TEXT,
-      systemPrompt: CORE_SYSTEM_PROMPT,
-      userPrompt,
-      useSchema: false,
-      maxOutputTokens: Math.max(tokenBudget, Math.min(MAX_OUTPUT_TOKENS_RETRY, 3200))
-    });
-    rawText = extractOutputText(response);
-  }
-
-  if (!rawText) {
-    const rescued = await rescueExplanationOnlyResult({
-      selectedText,
-      clientId,
-      model,
-      explanationMode,
-      candidates,
-      reasonHint: "empty_output"
-    });
-    if (rescued) {
-      return {
-        parsed: rescued,
-        candidateCount: candidates.length,
-        candidates
-      };
-    }
     return {
       parsed: buildLocalFallbackResult(
         selectedText,
-        "EasyRead used fallback mode because the model response was cut off."
+        "EasyRead used fallback mode because the model response was empty."
       ),
       candidateCount: candidates.length,
       candidates
@@ -830,21 +790,6 @@ async function analyzeExplanationOnlySelection({
   try {
     parsed = parseAndNormalizeResponse(rawText);
   } catch (_error) {
-    const rescued = await rescueExplanationOnlyResult({
-      selectedText,
-      clientId,
-      model,
-      explanationMode,
-      candidates,
-      reasonHint: "bad_json"
-    });
-    if (rescued) {
-      return {
-        parsed: rescued,
-        candidateCount: candidates.length,
-        candidates
-      };
-    }
     return {
       parsed: buildLocalFallbackResult(
         selectedText,
@@ -856,36 +801,21 @@ async function analyzeExplanationOnlySelection({
   }
 
   if (!hasText(parsed.simple_explanation)) {
-    const rescued = await rescueExplanationOnlyResult({
-      selectedText,
-      clientId,
-      model,
-      explanationMode,
-      candidates,
-      reasonHint: "missing_explanation"
-    });
-    if (rescued) {
-      parsed = rescued;
-    }
+    return {
+      parsed: buildLocalFallbackResult(
+        selectedText,
+        "EasyRead used fallback mode because the model returned empty explanation text."
+      ),
+      candidateCount: candidates.length,
+      candidates
+    };
   }
 
   if (isExplanationTooCloseToSource(parsed.simple_explanation, selectedText)) {
-    const rescued = await rescueExplanationOnlyResult({
+    parsed = buildLocalFallbackResult(
       selectedText,
-      clientId,
-      model,
-      explanationMode,
-      candidates,
-      reasonHint: "copied_source"
-    });
-    if (rescued) {
-      parsed = rescued;
-    } else {
-      parsed = buildLocalFallbackResult(
-        selectedText,
-        "EasyRead used fallback mode because the model repeated the original text."
-      );
-    }
+      "EasyRead used fallback mode because the model repeated the original text."
+    );
   }
 
   parsed = enforceEasyLanguage(
@@ -1461,22 +1391,11 @@ Rules:
     model,
     systemPrompt,
     userPrompt,
-    schema: WORD_COVERAGE_SCHEMA,
-    schemaName: "easyread_word_coverage"
-  });
+    useSchema: false,
+    maxAttempts: 1
+  }).catch(() => null);
 
-  let rawText = extractOutputText(response);
-  if (!rawText && model === MODEL_SHORT_TEXT) {
-    const rescueResponse = await requestResponsesApi({
-      clientId,
-      model: MODEL_LONG_TEXT,
-      systemPrompt,
-      userPrompt,
-      useSchema: false,
-      maxOutputTokens: 2000
-    });
-    rawText = extractOutputText(rescueResponse);
-  }
+  const rawText = extractOutputText(response);
   if (!rawText) {
     return [];
   }
@@ -1484,24 +1403,6 @@ Rules:
   try {
     return parseAndNormalizeWordCoverage(rawText);
   } catch (_error) {
-    if (model === MODEL_SHORT_TEXT) {
-      try {
-        const rescueResponse = await requestResponsesApi({
-          clientId,
-          model: MODEL_LONG_TEXT,
-          systemPrompt,
-          userPrompt,
-          useSchema: false,
-          maxOutputTokens: 2000
-        });
-        const rescueRawText = extractOutputText(rescueResponse);
-        if (rescueRawText) {
-          return parseAndNormalizeWordCoverage(rescueRawText);
-        }
-      } catch (_rescueError) {
-        return [];
-      }
-    }
     return [];
   }
 }
@@ -1789,7 +1690,8 @@ async function requestResponsesApi({
   schema = EASYREAD_JSON_SCHEMA,
   schemaName = "easyread_output",
   useSchema = true,
-  maxOutputTokens = MAX_OUTPUT_TOKENS
+  maxOutputTokens = MAX_OUTPUT_TOKENS,
+  maxAttempts = 1
 }) {
   const payload = {
     model,
@@ -1819,7 +1721,7 @@ async function requestResponsesApi({
   }
 
   try {
-    return await postResponsesPayload({ clientId, payload });
+    return await postResponsesPayload({ clientId, payload, maxAttempts });
   } catch (error) {
     const schemaIssue =
       useSchema &&
@@ -1832,11 +1734,11 @@ async function requestResponsesApi({
 
     const fallbackPayload = { ...payload };
     delete fallbackPayload.text;
-    return postResponsesPayload({ clientId, payload: fallbackPayload });
+    return postResponsesPayload({ clientId, payload: fallbackPayload, maxAttempts });
   }
 }
 
-async function postResponsesPayload({ clientId, payload }) {
+async function postResponsesPayload({ clientId, payload, maxAttempts = 1 }) {
   return withExponentialBackoff(async () => {
     return postProxyJson({
       clientId,
@@ -1845,7 +1747,7 @@ async function postResponsesPayload({ clientId, payload }) {
         payload
       }
     });
-  }, 3);
+  }, Math.max(1, Number(maxAttempts) || 1));
 }
 
 async function withExponentialBackoff(action, maxAttempts) {
