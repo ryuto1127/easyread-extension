@@ -116,17 +116,20 @@
     true
   );
 
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type === "easyread-context-explain") {
-      const textFromMenu = typeof message.selectionText === "string" ? message.selectionText.trim() : "";
-      runExplain(textFromMenu || getSelectionText());
-      return;
-    }
+  const runtimeApi = getRuntimeApi();
+  if (runtimeApi?.onMessage?.addListener) {
+    runtimeApi.onMessage.addListener((message) => {
+      if (message?.type === "easyread-context-explain") {
+        const textFromMenu = typeof message.selectionText === "string" ? message.selectionText.trim() : "";
+        runExplain(textFromMenu || getSelectionText());
+        return;
+      }
 
-    if (message?.type === "easyread-words-update") {
-      handleWordsUpdate(message);
-    }
-  });
+      if (message?.type === "easyread-words-update") {
+        handleWordsUpdate(message);
+      }
+    });
+  }
 
   function scheduleSelectionCheck() {
     if (selectionTimer) {
@@ -444,14 +447,32 @@
 
   function sendRuntimeMessage(message) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
+      const runtime = getRuntimeApi();
+      if (!runtime || typeof runtime.sendMessage !== "function") {
+        reject(
+          new Error(
+            "EasyRead extension context is unavailable. Reload the extension in chrome://extensions and refresh this page."
+          )
+        );
+        return;
+      }
+
+      runtime.sendMessage(message, (response) => {
+        if (runtime.lastError) {
+          reject(new Error(runtime.lastError.message));
           return;
         }
         resolve(response);
       });
     });
+  }
+
+  function getRuntimeApi() {
+    const runtime = globalThis.chrome?.runtime;
+    if (!runtime || typeof runtime !== "object") {
+      return null;
+    }
+    return runtime;
   }
 
   function rerunWithMode(mode) {

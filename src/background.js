@@ -23,11 +23,11 @@ const MODEL_SHORT_TEXT = "gpt-5-nano";
 const MODEL_LONG_TEXT = "gpt-5-mini";
 const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
 const DEFAULT_EXPLANATION_MODE = "balanced";
-const MODEL_NANO_MAX_CHARS = 1200;
+const MODEL_NANO_MAX_CHARS = 1800;
 const MAX_A2_CANDIDATES = 48;
 const MAX_OUTPUT_TOKENS = 1200;
 const MAX_OUTPUT_TOKENS_RETRY = 2400;
-const MAX_EXPLAIN_ATTEMPTS = 3;
+const MAX_EXPLAIN_ATTEMPTS = 2;
 const HARD_MAX_CHARS = 12000;
 const CHUNK_THRESHOLD_CHARS = 4500;
 const CHUNK_SIZE_CHARS = 1600;
@@ -602,9 +602,7 @@ async function analyzeExplanationOnlySelection({
     model,
     systemPrompt: CORE_SYSTEM_PROMPT,
     userPrompt,
-    schema: EXPLANATION_ONLY_SCHEMA,
-    schemaName: "easyread_explanation_only",
-    useSchema: true,
+    useSchema: false,
     maxOutputTokens: tokenBudget
   });
 
@@ -665,67 +663,29 @@ async function analyzeExplanationOnlySelection({
   try {
     parsed = parseAndNormalizeResponse(rawText);
   } catch (_error) {
-    const repaired = await tryRepairResponseJson({
+    const rescued = await rescueExplanationOnlyResult({
+      selectedText,
       clientId,
-      originalModel: model,
-      rawText
+      model,
+      explanationMode,
+      candidates,
+      reasonHint: "bad_json"
     });
-    if (repaired) {
-      parsed = repaired;
-    } else if (model === MODEL_SHORT_TEXT) {
-      const rescuePrompt = `${userPrompt}
-Return valid JSON only. The field simple_explanation must be non-empty.`;
-      const rescueResponse = await requestResponsesApi({
-        clientId,
-        model: MODEL_LONG_TEXT,
-        systemPrompt: CORE_SYSTEM_PROMPT,
-        userPrompt: rescuePrompt,
-        useSchema: false,
-        maxOutputTokens: Math.max(tokenBudget, MAX_OUTPUT_TOKENS_RETRY)
-      });
-      const rescueRawText = extractOutputText(rescueResponse);
-
-      if (rescueRawText) {
-        try {
-          parsed = parseAndNormalizeResponse(rescueRawText);
-        } catch (_rescueParseError) {
-          const rescueRepaired = await tryRepairResponseJson({
-            clientId,
-            originalModel: MODEL_LONG_TEXT,
-            rawText: rescueRawText
-          });
-          if (rescueRepaired) {
-            parsed = rescueRepaired;
-          }
-        }
-      }
-    }
-
-    if (!parsed) {
-      const rescued = await rescueExplanationOnlyResult({
-        selectedText,
-        clientId,
-        model,
-        explanationMode,
-        candidates,
-        reasonHint: "bad_json"
-      });
-      if (rescued) {
-        return {
-          parsed: rescued,
-          candidateCount: candidates.length,
-          candidates
-        };
-      }
+    if (rescued) {
       return {
-        parsed: buildLocalFallbackResult(
-          selectedText,
-          "EasyRead used fallback mode because model JSON formatting failed."
-        ),
+        parsed: rescued,
         candidateCount: candidates.length,
         candidates
       };
     }
+    return {
+      parsed: buildLocalFallbackResult(
+        selectedText,
+        "EasyRead used fallback mode because model JSON formatting failed."
+      ),
+      candidateCount: candidates.length,
+      candidates
+    };
   }
 
   if (!hasText(parsed.simple_explanation)) {
@@ -2014,12 +1974,6 @@ async function rescueExplanationOnlyResult({
   reasonHint = ""
 }) {
   try {
-    const rescuePrompt = buildUserPrompt({
-      selectedText,
-      candidates: Array.isArray(candidates) ? candidates.slice(0, 20) : [],
-      wordLimit: Math.min(getWordResultLimit(selectedText.length), 8),
-      explanationMode
-    });
     const correctionHint =
       reasonHint === "copied_source"
         ? "Do not copy the selected text. Rewrite the meaning in easier words and different sentence form."
@@ -2028,16 +1982,23 @@ async function rescueExplanationOnlyResult({
           : reasonHint === "bad_json"
             ? "Your previous answer was not valid JSON. Return JSON only, no markdown, no extra text."
             : "Previous answer returned no text. Return complete JSON with clear explanation now.";
-
-    const rescued = await callModelForEasyRead({
+    const rescuePrompt = `${buildExplanationOnlyPrompt(selectedText, explanationMode)}
+${correctionHint}`.trim();
+    const rescueModel = model === MODEL_SHORT_TEXT ? MODEL_LONG_TEXT : model;
+    const rescueResponse = await requestResponsesApi({
       clientId,
-      model,
-      selectedTextLength: selectedText.length,
-      selectedTextForFallback: selectedText,
+      model: rescueModel,
+      systemPrompt: CORE_SYSTEM_PROMPT,
       userPrompt: rescuePrompt,
-      explanationMode,
-      correctionHint
+      useSchema: false,
+      maxOutputTokens: Math.max(getExplanationOnlyTokenBudget(selectedText.length, explanationMode), 900)
     });
+    const rescueText = extractOutputText(rescueResponse);
+    if (!rescueText) {
+      return null;
+    }
+
+    const rescued = parseAndNormalizeResponse(rescueText);
 
     if (!hasText(rescued?.simple_explanation)) {
       return null;
