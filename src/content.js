@@ -417,11 +417,14 @@
       renderExplanation(result);
       renderWords(result, false);
       showStatus(`Explanation ready • ${getModeLabel(explanationMode)} • words updated`);
-    } catch (_error) {
+    } catch (error) {
       if (current !== state.currentRequestId) {
         return;
       }
-      wordsPanel.textContent = "Words took too long. Please try again.";
+      wordsPanel.textContent =
+        error instanceof Error && error.message
+          ? error.message
+          : "Words took too long. Please try again.";
       showStatus("Explanation ready • words update failed");
     } finally {
       if (state.wordsFetchRequestId === current) {

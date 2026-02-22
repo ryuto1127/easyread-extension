@@ -500,7 +500,6 @@ async function handleFetchWordsRequest(payload, _sender) {
         : buildLocalFallbackResult(selectedText, "EasyRead used fallback mode because base explanation was missing.");
 
   const candidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
-  const filteredCandidates = filterNameLikeCandidates(candidates);
   if (candidates.length === 0) {
     const noWordsResult = enforceEasyLanguage(
       {
@@ -535,14 +534,14 @@ async function handleFetchWordsRequest(payload, _sender) {
 
   let words = [];
   const wordModel =
-    filteredCandidates.length >= 5 || selectedText.length > 320 ? MODEL_LONG_TEXT : selectedModel;
+    selectedText.length > 900 || candidates.length > 12 ? MODEL_LONG_TEXT : MODEL_SHORT_TEXT;
   try {
     words = await withTimeout(
       callModelForB2PlusWords({
         clientId,
         model: wordModel,
         selectedText,
-        candidateHints: filteredCandidates.length > 0 ? filteredCandidates : candidates,
+        candidateHints: candidates,
         wordLimit: getWordResultLimit(selectedText.length)
       }),
       WORD_FETCH_TIMEOUT_MS
@@ -554,10 +553,11 @@ async function handleFetchWordsRequest(payload, _sender) {
   let finalWordItems = keepB2PlusWords(words);
   let finalNotes = baseResult.notes || "";
   if (finalWordItems.length === 0) {
-    finalWordItems = [];
-    finalNotes = appendNote(
-      finalNotes,
-      "EasyRead could not load word definitions now. Please try again."
+    throw new EasyReadError(
+      candidates.length > 0
+        ? "Words could not load now. Please click Explain again."
+        : "No words above B1 found.",
+      "WORDS_UNAVAILABLE"
     );
   }
 
@@ -1877,28 +1877,28 @@ function simplifyNoteText(note) {
   const lower = raw.toLowerCase();
 
   if (lower.includes("easyread stopped after multiple retries")) {
-    return "EasyRead used backup mode after retry limit.";
+    return "";
   }
   if (lower.includes("easyread used fallback mode") && lower.includes("repeated the original text")) {
-    return "EasyRead used backup mode because the model copied the source text.";
+    return "";
   }
   if (lower.includes("easyread used fallback mode") && lower.includes("returned empty explanation text")) {
-    return "EasyRead used backup mode because model explanation was empty.";
+    return "";
   }
   if (lower.includes("easyread used fallback mode") && (lower.includes("cut off") || lower.includes("incomplete"))) {
-    return "EasyRead used backup mode because the model answer was cut off.";
+    return "";
   }
   if (
     lower.includes("easyread used fallback mode") &&
     (lower.includes("json formatting failed") || lower.includes("json"))
   ) {
-    return "EasyRead used backup mode because model format was broken.";
+    return "";
   }
   if (
     lower.includes("easyread used fallback mode") ||
     lower.includes("easyread filled a backup explanation")
   ) {
-    return "EasyRead used backup mode because of a model problem.";
+    return "";
   }
   if (lower.includes("no words above b1")) {
     return "EasyRead did not find clear hard words above B1.";
