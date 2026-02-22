@@ -25,9 +25,9 @@ const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
 const DEFAULT_EXPLANATION_MODE = "balanced";
 const MODEL_NANO_MAX_CHARS = 1800;
 const MAX_A2_CANDIDATES = 48;
-const MAX_OUTPUT_TOKENS = 1800;
-const MAX_OUTPUT_TOKENS_RETRY = 6000;
-const MAX_EXPLAIN_ATTEMPTS = 4;
+const MAX_OUTPUT_TOKENS = 1200;
+const MAX_OUTPUT_TOKENS_RETRY = 3200;
+const MAX_EXPLAIN_ATTEMPTS = 2;
 const HARD_MAX_CHARS = 12000;
 const CHUNK_THRESHOLD_CHARS = 4500;
 const CHUNK_SIZE_CHARS = 1600;
@@ -231,7 +231,6 @@ async function handleExplainRequest(payload, sender) {
   const selectedText = normalizeSelection(payload.selectedText);
   const requestId = normalizeRequestId(payload.requestId);
   const explanationMode = normalizeExplanationMode(payload.explanationMode);
-  const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null;
 
   if (!selectedText) {
     throw new EasyReadError("Please select text first.", "NO_SELECTION");
@@ -243,7 +242,6 @@ async function handleExplainRequest(payload, sender) {
     );
   }
   const isFastSingleCallPath = selectedText.length <= FAST_SINGLE_CALL_MAX_CHARS;
-  const shouldUseDeferredWords = !isFastSingleCallPath;
   const selectedModel = chooseModelForText(selectedText.length);
   const clientId = await getOrCreateAnonymousClientId(settings);
 
@@ -337,10 +335,26 @@ async function handleExplainRequest(payload, sender) {
       explanationMode
     });
 
+    const localWordItems =
+      explanationOnly.candidateCount > 0
+        ? buildLocalWordFallbackEntries(
+            explanationOnly.candidates,
+            getWordResultLimit(selectedText.length)
+          )
+        : [];
+    const localWordNotes =
+      localWordItems.length === 0 && explanationOnly.candidateCount > 0
+        ? appendNote(
+            explanationOnly.parsed.notes,
+            "No words above B1 were detected with enough confidence."
+          )
+        : explanationOnly.parsed.notes;
+
     const immediateResult = enforceEasyLanguage(
       {
         ...explanationOnly.parsed,
-        a2_plus_words: []
+        notes: localWordNotes,
+        a2_plus_words: localWordItems
       },
       selectedText
     );
@@ -354,37 +368,18 @@ async function handleExplainRequest(payload, sender) {
       throw new EasyReadError("Model output is empty. Please try again.", "EMPTY_RESULT");
     }
 
-    if (!shouldUseDeferredWords || explanationOnly.candidateCount <= 0) {
-      await saveCachedResponse(
-        cacheKey,
-        {
-          selectedText,
-          explanationMode,
-          model: selectedModel
-        },
-        safeImmediateResult
-      );
-      return {
-        result: safeImmediateResult,
-        wordsPending: false
-      };
-    }
-
-    void runDeferredWordsPass({
-      tabId,
-      requestId,
-      selectedText,
-      candidates: explanationOnly.candidates,
-      clientId,
-      model: selectedModel,
-      explanationMode,
-      baseResult: safeImmediateResult,
-      cacheKey
-    });
-
+    await saveCachedResponse(
+      cacheKey,
+      {
+        selectedText,
+        explanationMode,
+        model: selectedModel
+      },
+      safeImmediateResult
+    );
     return {
       result: safeImmediateResult,
-      wordsPending: true
+      wordsPending: false
     };
   })();
 
@@ -968,9 +963,9 @@ function getExplanationLengthGuidance(selectionLength, explanationMode) {
       return "Write 3 to 4 short sentences.";
     }
     if (selectionLength <= 700) {
-      return "Write 4 to 5 short sentences.";
+      return "Write 3 to 5 short sentences.";
     }
-    return "Write 5 to 6 short sentences.";
+    return "Write 4 to 6 short sentences.";
   }
 
   if (mode === "detailed") {
@@ -978,24 +973,24 @@ function getExplanationLengthGuidance(selectionLength, explanationMode) {
       return "Write 3 to 4 sentences with key detail.";
     }
     if (selectionLength <= 320) {
-      return "Write 5 to 7 sentences.";
+      return "Write 4 to 6 sentences.";
     }
     if (selectionLength <= 700) {
-      return "Write 7 to 9 sentences.";
+      return "Write 5 to 7 sentences.";
     }
-    return "Write 8 to 10 sentences.";
+    return "Write 6 to 8 sentences.";
   }
 
   if (selectionLength <= 120) {
-    return "Write 3 to 4 short sentences.";
+    return "Write 2 to 3 short sentences.";
   }
   if (selectionLength <= 320) {
-    return "Write 4 to 6 sentences.";
+    return "Write 3 to 5 sentences.";
   }
   if (selectionLength <= 700) {
-    return "Write 6 to 8 sentences.";
+    return "Write 4 to 6 sentences.";
   }
-  return "Write 7 to 9 sentences.";
+  return "Write 5 to 7 sentences.";
 }
 
 function getWordResultLimit(selectionLength) {
@@ -1017,27 +1012,27 @@ function getOutputTokenBudget({ model, selectedTextLength, explanationMode = DEF
 
   if (model === MODEL_SHORT_TEXT) {
     if (selectedTextLength <= 180) {
-      budget = 1200;
+      budget = 900;
     } else if (selectedTextLength <= 700) {
-      budget = 1500;
+      budget = 1100;
     } else {
-      budget = 1800;
+      budget = 1300;
     }
   } else if (selectedTextLength <= 700) {
-    budget = 1700;
+    budget = 1300;
   } else if (selectedTextLength <= 1800) {
-    budget = 2200;
+    budget = 1600;
   } else {
-    budget = 2800;
+    budget = 2000;
   }
 
   if (mode === "simple") {
-    budget -= 160;
+    budget -= 120;
   } else if (mode === "detailed") {
-    budget += 300;
+    budget += 200;
   }
 
-  return Math.max(1000, budget);
+  return Math.max(700, budget);
 }
 
 function getExplanationOnlyTokenBudget(selectionLength, explanationMode = DEFAULT_EXPLANATION_MODE) {
@@ -1045,20 +1040,20 @@ function getExplanationOnlyTokenBudget(selectionLength, explanationMode = DEFAUL
   let budget;
 
   if (selectionLength <= 320) {
-    budget = 1200;
+    budget = 900;
   } else if (selectionLength <= 1200) {
-    budget = 1600;
+    budget = 1200;
   } else {
-    budget = 2100;
+    budget = 1600;
   }
 
   if (mode === "simple") {
-    budget -= 160;
+    budget -= 120;
   } else if (mode === "detailed") {
-    budget += 300;
+    budget += 180;
   }
 
-  return Math.max(1000, budget);
+  return Math.max(700, budget);
 }
 
 function normalizeWordKey(word) {
