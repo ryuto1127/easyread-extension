@@ -14,6 +14,7 @@
     lastResult: null,
     lastSelectionText: "",
     currentRequestId: "",
+    wordsFetchRequestId: "",
     explanationMode: "balanced"
   };
 
@@ -246,6 +247,13 @@
         wordsPending: Boolean(response.data?.wordsPending),
         explanationMode: requestedMode
       });
+      if (response.data?.wordsPending) {
+        void fetchWordsForCurrentRequest({
+          requestId,
+          selectedText,
+          explanationMode: requestedMode
+        });
+      }
     } catch (error) {
       renderError(error.message || "Failed to explain the selection.");
     } finally {
@@ -368,6 +376,58 @@
     explanationPanel.textContent = message;
     wordsPanel.textContent = "No data.";
     showStatus("Error");
+  }
+
+  async function fetchWordsForCurrentRequest({ requestId, selectedText, explanationMode }) {
+    const current = typeof requestId === "string" ? requestId.trim() : "";
+    if (!current || current !== state.currentRequestId) {
+      return;
+    }
+    if (state.wordsFetchRequestId === current) {
+      return;
+    }
+    state.wordsFetchRequestId = current;
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: "easyread-fetch-words",
+        payload: {
+          requestId: current,
+          selectedText,
+          pageUrl: window.location.href,
+          pageOrigin: window.location.origin,
+          explanationMode,
+          baseResult: state.lastResult
+        }
+      });
+
+      if (!response?.ok) {
+        throw new Error(response?.error || "Failed to load words.");
+      }
+      if (response.data?.requestId && response.data.requestId !== state.currentRequestId) {
+        return;
+      }
+
+      const result = response.data?.result;
+      if (!result || typeof result !== "object") {
+        throw new Error("No words result returned.");
+      }
+
+      state.lastResult = result;
+      renderExplanation(result);
+      renderWords(result, false);
+      showStatus(`Explanation ready • ${getModeLabel(explanationMode)} • words updated`);
+    } catch (_error) {
+      if (current !== state.currentRequestId) {
+        return;
+      }
+      wordsPanel.textContent = "Words took too long. Please try again.";
+      showStatus("Explanation ready • words update failed");
+    } finally {
+      if (state.wordsFetchRequestId === current) {
+        state.wordsFetchRequestId = "";
+      }
+    }
   }
 
   function setLoading(isLoading, explanationMode = "balanced", isRefine = false) {

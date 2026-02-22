@@ -37,6 +37,7 @@ const MAX_CHUNK_CONCURRENCY = 2;
 const FAST_SINGLE_CALL_MAX_CHARS = 0;
 const inflightRequests = new Map();
 const B2_PLUS_LEVELS = new Set(["B2", "C1", "C2"]);
+const WORD_FETCH_TIMEOUT_MS = 14000;
 const BACKUP_SUMMARY_STOP_WORDS = new Set([
   "about",
   "after",
@@ -202,6 +203,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "easyread-fetch-words") {
+    handleFetchWordsRequest(message.payload || {}, sender)
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: toUserErrorMessage(error) }));
+    return true;
+  }
+
   if (message?.type === "easyread-clear-cache") {
     clearCache()
       .then(() => sendResponse({ ok: true }))
@@ -261,6 +269,20 @@ async function handleExplainRequest(payload, sender) {
       selectedText,
       "EasyRead filled a backup explanation because cached output was empty."
     );
+    const cachedWords = Array.isArray(safeCached.a2_plus_words) ? safeCached.a2_plus_words : [];
+    const cachedHasWords = cachedWords.length > 0;
+    if (!cachedHasWords) {
+      const cachedCandidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
+      if (cachedCandidates.length > 0) {
+        return {
+          cached: true,
+          result: safeCached,
+          requestId,
+          wordsPending: true,
+          explanationMode
+        };
+      }
+    }
     return {
       cached: true,
       result: safeCached,
@@ -335,26 +357,10 @@ async function handleExplainRequest(payload, sender) {
       explanationMode
     });
 
-    const localWordItems =
-      explanationOnly.candidateCount > 0
-        ? buildLocalWordFallbackEntries(
-            explanationOnly.candidates,
-            getWordResultLimit(selectedText.length)
-          )
-        : [];
-    const localWordNotes =
-      localWordItems.length === 0 && explanationOnly.candidateCount > 0
-        ? appendNote(
-            explanationOnly.parsed.notes,
-            "No words above B1 were detected with enough confidence."
-          )
-        : explanationOnly.parsed.notes;
-
     const immediateResult = enforceEasyLanguage(
       {
         ...explanationOnly.parsed,
-        notes: localWordNotes,
-        a2_plus_words: localWordItems
+        a2_plus_words: []
       },
       selectedText
     );
@@ -368,6 +374,21 @@ async function handleExplainRequest(payload, sender) {
       throw new EasyReadError("Model output is empty. Please try again.", "EMPTY_RESULT");
     }
 
+    if (explanationOnly.candidateCount <= 0) {
+      await saveCachedResponse(
+        cacheKey,
+        {
+          selectedText,
+          explanationMode,
+          model: selectedModel
+        },
+        safeImmediateResult
+      );
+      return {
+        result: safeImmediateResult,
+        wordsPending: false
+      };
+    }
     await saveCachedResponse(
       cacheKey,
       {
@@ -379,7 +400,7 @@ async function handleExplainRequest(payload, sender) {
     );
     return {
       result: safeImmediateResult,
-      wordsPending: false
+      wordsPending: true
     };
   })();
 
@@ -424,6 +445,157 @@ async function handleExplainRequest(payload, sender) {
       inflightRequests.delete(cacheKey);
     }
   }
+}
+
+async function handleFetchWordsRequest(payload, _sender) {
+  const settings = await getSettings();
+  const selectedText = normalizeSelection(payload.selectedText);
+  const requestId = normalizeRequestId(payload.requestId);
+  const explanationMode = normalizeExplanationMode(payload.explanationMode);
+
+  if (!selectedText) {
+    throw new EasyReadError("Please select text first.", "NO_SELECTION");
+  }
+  if (selectedText.length > HARD_MAX_CHARS) {
+    throw new EasyReadError(
+      `Selection is too long (${selectedText.length} chars). Max is ${HARD_MAX_CHARS}.`,
+      "SELECTION_TOO_LONG"
+    );
+  }
+
+  const selectedModel = chooseModelForText(selectedText.length);
+  const clientId = await getOrCreateAnonymousClientId(settings);
+  const pageOrigin = getPageOrigin(payload.pageUrl, payload.pageOrigin);
+  const cacheKey = await buildCacheKey({
+    pageOrigin,
+    selectedText,
+    explanationMode,
+    model: selectedModel,
+    modelVersion: MODEL_VERSION
+  });
+
+  const cached = await getCachedResponse(cacheKey);
+  if (cached) {
+    const safeCached = ensureNonEmptyExplanation(
+      cached,
+      selectedText,
+      "EasyRead filled a backup explanation because cached output was empty."
+    );
+    if (Array.isArray(safeCached.a2_plus_words) && safeCached.a2_plus_words.length > 0) {
+      return {
+        cached: true,
+        result: safeCached,
+        requestId,
+        wordsPending: false,
+        explanationMode
+      };
+    }
+  }
+
+  const baseResult =
+    payload?.baseResult && typeof payload.baseResult === "object"
+      ? payload.baseResult
+      : cached && typeof cached === "object"
+        ? cached
+        : buildLocalFallbackResult(selectedText, "EasyRead used fallback mode because base explanation was missing.");
+
+  const candidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
+  const filteredCandidates = filterNameLikeCandidates(candidates);
+  if (candidates.length === 0) {
+    const noWordsResult = enforceEasyLanguage(
+      {
+        ...baseResult,
+        a2_plus_words: [],
+        notes: appendNote(baseResult.notes || "", "No words above B1 were detected with enough confidence.")
+      },
+      selectedText
+    );
+    const safeNoWords = ensureNonEmptyExplanation(
+      noWordsResult,
+      selectedText,
+      "EasyRead filled a backup explanation because the model returned empty text."
+    );
+    await saveCachedResponse(
+      cacheKey,
+      {
+        selectedText,
+        explanationMode,
+        model: selectedModel
+      },
+      safeNoWords
+    );
+    return {
+      cached: false,
+      result: safeNoWords,
+      requestId,
+      wordsPending: false,
+      explanationMode
+    };
+  }
+
+  let words = [];
+  const wordModel =
+    filteredCandidates.length >= 5 || selectedText.length > 320 ? MODEL_LONG_TEXT : selectedModel;
+  try {
+    words = await withTimeout(
+      callModelForB2PlusWords({
+        clientId,
+        model: wordModel,
+        selectedText,
+        candidateHints: filteredCandidates.length > 0 ? filteredCandidates : candidates,
+        wordLimit: getWordResultLimit(selectedText.length)
+      }),
+      WORD_FETCH_TIMEOUT_MS
+    );
+  } catch (_error) {
+    words = [];
+  }
+
+  let finalWordItems = keepB2PlusWords(words);
+  let finalNotes = baseResult.notes || "";
+  if (finalWordItems.length === 0) {
+    const localBackupWords = buildLocalWordFallbackEntries(
+      filteredCandidates.length > 0 ? filteredCandidates : candidates,
+      getWordResultLimit(selectedText.length)
+    );
+    if (localBackupWords.length > 0) {
+      finalWordItems = localBackupWords;
+      finalNotes = appendNote(finalNotes, "EasyRead used backup word list because model word step failed.");
+    } else {
+      finalNotes = appendNote(finalNotes, "No words above B1 were detected with enough confidence.");
+    }
+  }
+
+  const finalResult = enforceEasyLanguage(
+    {
+      ...baseResult,
+      a2_plus_words: finalWordItems,
+      notes: finalNotes
+    },
+    selectedText
+  );
+  const safeFinalResult = ensureNonEmptyExplanation(
+    finalResult,
+    selectedText,
+    "EasyRead filled a backup explanation because the model returned empty text."
+  );
+  await saveCachedResponse(
+    cacheKey,
+    {
+      selectedText,
+      explanationMode,
+      model: selectedModel
+    },
+    safeFinalResult
+  );
+
+  return {
+    cached: false,
+    result: safeFinalResult,
+    requestId,
+    wordsPending: false,
+    explanationMode
+  };
 }
 
 function normalizeSelection(value) {
@@ -995,15 +1167,15 @@ function getExplanationLengthGuidance(selectionLength, explanationMode) {
 
 function getWordResultLimit(selectionLength) {
   if (selectionLength <= 180) {
-    return 10;
+    return 8;
   }
   if (selectionLength <= 500) {
-    return 14;
+    return 10;
   }
   if (selectionLength <= 1200) {
-    return 18;
+    return 12;
   }
-  return 24;
+  return 14;
 }
 
 function getOutputTokenBudget({ model, selectedTextLength, explanationMode = DEFAULT_EXPLANATION_MODE }) {
@@ -1279,6 +1451,10 @@ Rules:
 4) Set cefr only to B2, C1, or C2.
 5) Fill lemma, pos, cefr, definition_simple, example_simple.
 6) definition_simple and example_simple must not be empty.
+7) definition_simple must explain the word in this context in at least 5 words.
+8) example_simple must be a fresh sentence (not a template) with at least 6 words.
+9) Do not output generic lines like "This is a hard word in this text."
+10) Do not include person names, place names, or organization names unless the word is a true difficult vocabulary item.
 `;
   const response = await requestResponsesApi({
     clientId,
@@ -1693,99 +1869,41 @@ async function withExponentialBackoff(action, maxAttempts) {
   throw lastError || new EasyReadError("Request failed.", "UNKNOWN");
 }
 
-async function runDeferredWordsPass({
-  tabId,
-  requestId,
-  selectedText,
-  candidates,
-  clientId,
-  model,
-  explanationMode = DEFAULT_EXPLANATION_MODE,
-  baseResult,
-  cacheKey
-}) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout(promise, timeoutMs) {
+  let timer = null;
   try {
-    const candidateList = Array.isArray(candidates) ? candidates : [];
-    let words = [];
-
-    if (candidateList.length > 0) {
-      words = await callModelForB2PlusWords({
-        clientId,
-        model,
-        selectedText,
-        candidateHints: candidateList,
-        wordLimit: getWordResultLimit(selectedText.length)
-      });
-    }
-
-    let finalWordItems = keepB2PlusWords(words);
-    let finalNotes = baseResult.notes || "";
-    if (finalWordItems.length === 0 && candidateList.length > 0) {
-      const localBackupWords = buildLocalWordFallbackEntries(
-        candidateList,
-        getWordResultLimit(selectedText.length)
-      );
-      if (localBackupWords.length > 0) {
-        finalWordItems = localBackupWords;
-        finalNotes = appendNote(finalNotes, "EasyRead used backup word list because model word step failed.");
-      } else {
-        finalNotes = appendNote(finalNotes, "No words above B1 were detected with enough confidence.");
-      }
-    }
-
-    const finalResult = enforceEasyLanguage(
-      {
-        ...baseResult,
-        a2_plus_words: finalWordItems,
-        notes: finalNotes
-      },
-      selectedText
-    );
-    const safeFinalResult = ensureNonEmptyExplanation(
-      finalResult,
-      selectedText,
-      "EasyRead filled a backup explanation because the model returned empty text."
-    );
-
-    await saveCachedResponse(
-      cacheKey,
-      {
-        selectedText,
-        explanationMode,
-        model
-      },
-      safeFinalResult
-    );
-
-    if (Number.isInteger(tabId)) {
-      await sendTabUpdate(tabId, {
-        type: "easyread-words-update",
-        requestId,
-        explanationMode,
-        result: safeFinalResult
-      });
-    }
-  } catch (_error) {
-    if (Number.isInteger(tabId)) {
-      await sendTabUpdate(tabId, {
-        type: "easyread-words-update",
-        requestId,
-        error: "Words are taking too long. Try again for the full word list."
-      });
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new EasyReadError("Words request timed out.", "WORD_TIMEOUT"));
+        }, Math.max(1000, Number(timeoutMs) || WORD_FETCH_TIMEOUT_MS));
+      })
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
     }
   }
 }
 
-function sendTabUpdate(tabId, message) {
-  return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, message, () => {
-      resolve();
-    });
+function filterNameLikeCandidates(candidates) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  return list.filter((word) => {
+    const raw = String(word || "").trim();
+    if (!raw) {
+      return false;
+    }
+    // Skip simple title-case names like "Margaret" in local fallback and hints.
+    if (/^[A-Z][a-z]{2,}$/.test(raw)) {
+      return false;
+    }
+    return true;
   });
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function enforceEasyLanguage(result, selectedText) {
@@ -1794,7 +1912,7 @@ function enforceEasyLanguage(result, selectedText) {
     simple_explanation: simplifyToEasyText(base.simple_explanation, selectedText),
     a2_plus_words: Array.isArray(base.a2_plus_words) ? base.a2_plus_words : [],
     notes: simplifyNoteText(base.notes || ""),
-    confidence: typeof base.confidence === "number" ? base.confidence : 0.5
+    confidence: normalizeDisplayConfidence(base.confidence, base.notes, base.simple_explanation)
   };
 
   normalized.a2_plus_words = normalized.a2_plus_words.map((item) => ({
@@ -1806,6 +1924,33 @@ function enforceEasyLanguage(result, selectedText) {
   }));
 
   return normalized;
+}
+
+function normalizeDisplayConfidence(rawValue, notes, explanation) {
+  const lowerNotes = String(notes || "").toLowerCase();
+  const hasBackupSignal =
+    lowerNotes.includes("backup mode") ||
+    lowerNotes.includes("fallback") ||
+    lowerNotes.includes("model problem");
+  const hasExplanation = hasText(explanation);
+
+  if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+    let confidence = Math.max(0, Math.min(1, rawValue));
+    if (hasBackupSignal) {
+      confidence = Math.min(confidence, 0.35);
+    } else if (confidence <= 0.5 && hasExplanation) {
+      confidence = 0.72;
+    }
+    return Number(confidence.toFixed(2));
+  }
+
+  if (hasBackupSignal) {
+    return 0.35;
+  }
+  if (hasExplanation) {
+    return 0.78;
+  }
+  return 0.5;
 }
 
 function simplifyToEasyText(text, selectedText) {
