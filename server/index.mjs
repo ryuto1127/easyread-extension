@@ -193,7 +193,7 @@ function sanitizeResponsesPayload(payload) {
   delete next.presence_penalty;
 
   if (typeof next.max_output_tokens === "number") {
-    next.max_output_tokens = Math.max(64, Math.min(2000, Math.floor(next.max_output_tokens)));
+    next.max_output_tokens = Math.max(64, Math.min(2800, Math.floor(next.max_output_tokens)));
   }
 
   return next;

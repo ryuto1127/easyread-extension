@@ -26,8 +26,8 @@ const DEFAULT_EXPLANATION_MODE = "balanced";
 const MODEL_NANO_MAX_CHARS = 1200;
 const MAX_A2_CANDIDATES = 48;
 const MAX_OUTPUT_TOKENS = 1200;
-const MAX_OUTPUT_TOKENS_RETRY = 2000;
-const MAX_EXPLAIN_ATTEMPTS = 2;
+const MAX_OUTPUT_TOKENS_RETRY = 2400;
+const MAX_EXPLAIN_ATTEMPTS = 3;
 const HARD_MAX_CHARS = 12000;
 const CHUNK_THRESHOLD_CHARS = 4500;
 const CHUNK_SIZE_CHARS = 1600;
@@ -37,6 +37,78 @@ const MAX_CHUNK_CONCURRENCY = 2;
 const FAST_SINGLE_CALL_MAX_CHARS = 0;
 const inflightRequests = new Map();
 const B2_PLUS_LEVELS = new Set(["B2", "C1", "C2"]);
+const BACKUP_SUMMARY_STOP_WORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "also",
+  "and",
+  "are",
+  "because",
+  "been",
+  "before",
+  "being",
+  "both",
+  "but",
+  "can",
+  "could",
+  "does",
+  "each",
+  "even",
+  "from",
+  "have",
+  "having",
+  "into",
+  "just",
+  "like",
+  "made",
+  "many",
+  "more",
+  "most",
+  "much",
+  "only",
+  "other",
+  "over",
+  "same",
+  "some",
+  "than",
+  "that",
+  "their",
+  "them",
+  "then",
+  "there",
+  "they",
+  "this",
+  "those",
+  "very",
+  "were",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "with",
+  "would"
+]);
+const LOCAL_SIMPLE_DEFINITIONS = {
+  hydrogen: "a gas and very light element",
+  bond: "a link or connection",
+  electrostatic: "from very small electric force",
+  electronegative: "able to pull shared electrons strongly",
+  covalently: "by sharing electrons in a bond",
+  atom: "the very small part of all matter",
+  molecule: "two or more atoms joined together",
+  emulated: "copied",
+  emulate: "copy",
+  specialized: "made for one special use",
+  specialize: "focus on one special area",
+  relatively: "compared with others",
+  attraction: "a force that pulls things together",
+  partially: "in part, not fully",
+  positive: "having a plus electric charge",
+  nearby: "close to something",
+  lone: "single; alone"
+};
 const WORD_COVERAGE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -564,6 +636,21 @@ async function analyzeExplanationOnlySelection({
   }
 
   if (!rawText) {
+    const rescued = await rescueExplanationOnlyResult({
+      selectedText,
+      clientId,
+      model,
+      explanationMode,
+      candidates,
+      reasonHint: "empty_output"
+    });
+    if (rescued) {
+      return {
+        parsed: rescued,
+        candidateCount: candidates.length,
+        candidates
+      };
+    }
     return {
       parsed: buildLocalFallbackResult(
         selectedText,
@@ -615,6 +702,21 @@ Return valid JSON only. The field simple_explanation must be non-empty.`;
     }
 
     if (!parsed) {
+      const rescued = await rescueExplanationOnlyResult({
+        selectedText,
+        clientId,
+        model,
+        explanationMode,
+        candidates,
+        reasonHint: "bad_json"
+      });
+      if (rescued) {
+        return {
+          parsed: rescued,
+          candidateCount: candidates.length,
+          candidates
+        };
+      }
       return {
         parsed: buildLocalFallbackResult(
           selectedText,
@@ -623,6 +725,39 @@ Return valid JSON only. The field simple_explanation must be non-empty.`;
         candidateCount: candidates.length,
         candidates
       };
+    }
+  }
+
+  if (!hasText(parsed.simple_explanation)) {
+    const rescued = await rescueExplanationOnlyResult({
+      selectedText,
+      clientId,
+      model,
+      explanationMode,
+      candidates,
+      reasonHint: "missing_explanation"
+    });
+    if (rescued) {
+      parsed = rescued;
+    }
+  }
+
+  if (isExplanationTooCloseToSource(parsed.simple_explanation, selectedText)) {
+    const rescued = await rescueExplanationOnlyResult({
+      selectedText,
+      clientId,
+      model,
+      explanationMode,
+      candidates,
+      reasonHint: "copied_source"
+    });
+    if (rescued) {
+      parsed = rescued;
+    } else {
+      parsed = buildLocalFallbackResult(
+        selectedText,
+        "EasyRead used fallback mode because the model repeated the original text."
+      );
     }
   }
 
@@ -824,6 +959,7 @@ Rules:
 9) confidence must be 0.0 to 1.0.
 10) Keep notes short, only when needed.
 11) Do not copy full sentences from the selected text. Paraphrase in easier words.
+12) Do not mention system/model issues in notes.
 `;
 }
 
@@ -848,6 +984,7 @@ Rules:
 4) Do not include word-list entries in this step.
 5) Keep notes short, only when needed.
 6) Do not copy full sentences from the selected text. Paraphrase in easier words.
+7) Do not mention system/model issues in notes.
 `;
 }
 
@@ -988,7 +1125,7 @@ function keepB2PlusWords(entries) {
 }
 
 function buildLocalWordFallbackEntries(candidates, wordLimit = 12) {
-  const maxEntries = Math.max(1, Math.min(Number(wordLimit) || 12, 12));
+  const maxEntries = Math.max(1, Math.min(Number(wordLimit) || 12, 18));
   const unique = [];
   const seen = new Set();
 
@@ -999,40 +1136,72 @@ function buildLocalWordFallbackEntries(candidates, wordLimit = 12) {
       continue;
     }
     seen.add(normalized);
-    unique.push({ rawWord, normalized });
+    unique.push({ rawWord, normalized, index: unique.length });
   }
 
   if (unique.length === 0) {
     return [];
   }
 
-  const mapped = unique.filter(
-    (item) =>
-      typeof EASY_WORD_REPLACEMENTS[item.normalized] === "string" ||
-      typeof EASY_WORD_REPLACEMENTS[guessLemma(item.normalized)] === "string"
-  );
-  const prioritized = mapped.length > 0 ? mapped : unique;
+  const ranked = unique
+    .map((item) => {
+      const lemma = guessLemma(item.normalized);
+      const hasLocalDefinition =
+        typeof LOCAL_SIMPLE_DEFINITIONS[item.normalized] === "string" ||
+        typeof LOCAL_SIMPLE_DEFINITIONS[lemma] === "string";
+      const hasMappedReplacement =
+        typeof EASY_WORD_REPLACEMENTS[item.normalized] === "string" ||
+        typeof EASY_WORD_REPLACEMENTS[lemma] === "string";
+      let score = 0;
+      if (hasLocalDefinition) {
+        score += 6;
+      }
+      if (hasMappedReplacement) {
+        score += 4;
+      }
+      if (item.normalized.length >= 8) {
+        score += 1;
+      }
+      return {
+        ...item,
+        lemma,
+        score
+      };
+    })
+    .sort((a, b) => (b.score === a.score ? a.index - b.index : b.score - a.score));
 
-  return prioritized.slice(0, maxEntries).map((item) => {
+  return ranked.slice(0, maxEntries).map((item) => {
     const lemma = guessLemma(item.normalized);
     const pos = guessPos(item.normalized);
-    const mappedMeaning =
-      EASY_WORD_REPLACEMENTS[item.normalized] || EASY_WORD_REPLACEMENTS[lemma] || "";
-    const easyMeaning = String(mappedMeaning || "").trim();
+    const easyMeaning = lookupLocalSimpleDefinition(item.normalized, lemma);
 
     return {
       word: item.rawWord,
       lemma,
       pos,
       cefr: "B2",
-      definition_simple: easyMeaning
-        ? `In this text, it means ${easyMeaning}.`
-        : "This is a hard word in this text.",
+      definition_simple: easyMeaning || "In this text, this word has a special meaning.",
       example_simple: easyMeaning
-        ? `Here, this word means ${easyMeaning}.`
-        : "Here, this word has a hard meaning."
+        ? `In this text, this word means: ${easyMeaning}.`
+        : `In this text, the writer uses "${item.rawWord}" in a special way.`
     };
   });
+}
+
+function lookupLocalSimpleDefinition(normalizedWord, lemma) {
+  const first = LOCAL_SIMPLE_DEFINITIONS[normalizedWord];
+  if (first) {
+    return first;
+  }
+  const second = LOCAL_SIMPLE_DEFINITIONS[lemma];
+  if (second) {
+    return second;
+  }
+  const mapped = EASY_WORD_REPLACEMENTS[normalizedWord] || EASY_WORD_REPLACEMENTS[lemma] || "";
+  if (mapped) {
+    return String(mapped).trim();
+  }
+  return "";
 }
 
 function guessLemma(word) {
@@ -1133,16 +1302,13 @@ async function callModelForB2PlusWords({
   candidateHints,
   wordLimit = 18
 }) {
-  const response = await requestResponsesApi({
-    clientId,
-    model,
-    systemPrompt: `
+  const systemPrompt = `
 You extract difficult words and explain them for learners.
 Return JSON only.
 Return only words above B1 (B2, C1, C2).
 Include any part of speech: noun, verb, adjective, adverb, preposition, pronoun, determiner, conjunction.
-`,
-    userPrompt: `
+`;
+  const userPrompt = `
 Return JSON only with key "a2_plus_words".
 
 Selected text:
@@ -1158,12 +1324,28 @@ Rules:
 4) Set cefr only to B2, C1, or C2.
 5) Fill lemma, pos, cefr, definition_simple, example_simple.
 6) definition_simple and example_simple must not be empty.
-`,
+`;
+  const response = await requestResponsesApi({
+    clientId,
+    model,
+    systemPrompt,
+    userPrompt,
     schema: WORD_COVERAGE_SCHEMA,
     schemaName: "easyread_word_coverage"
   });
 
-  const rawText = extractOutputText(response);
+  let rawText = extractOutputText(response);
+  if (!rawText && model === MODEL_SHORT_TEXT) {
+    const rescueResponse = await requestResponsesApi({
+      clientId,
+      model: MODEL_LONG_TEXT,
+      systemPrompt,
+      userPrompt,
+      useSchema: false,
+      maxOutputTokens: 900
+    });
+    rawText = extractOutputText(rescueResponse);
+  }
   if (!rawText) {
     return [];
   }
@@ -1171,6 +1353,24 @@ Rules:
   try {
     return parseAndNormalizeWordCoverage(rawText);
   } catch (_error) {
+    if (model === MODEL_SHORT_TEXT) {
+      try {
+        const rescueResponse = await requestResponsesApi({
+          clientId,
+          model: MODEL_LONG_TEXT,
+          systemPrompt,
+          userPrompt,
+          useSchema: false,
+          maxOutputTokens: 900
+        });
+        const rescueRawText = extractOutputText(rescueResponse);
+        if (rescueRawText) {
+          return parseAndNormalizeWordCoverage(rescueRawText);
+        }
+      } catch (_rescueError) {
+        return [];
+      }
+    }
     return [];
   }
 }
@@ -1679,15 +1879,29 @@ function simplifyNoteText(note) {
   }
   const lower = raw.toLowerCase();
 
+  if (lower.includes("easyread stopped after multiple retries")) {
+    return "EasyRead used backup mode after retry limit.";
+  }
+  if (lower.includes("easyread used fallback mode") && lower.includes("repeated the original text")) {
+    return "EasyRead used backup mode because the model copied the source text.";
+  }
+  if (lower.includes("easyread used fallback mode") && lower.includes("returned empty explanation text")) {
+    return "EasyRead used backup mode because model explanation was empty.";
+  }
+  if (lower.includes("easyread used fallback mode") && (lower.includes("cut off") || lower.includes("incomplete"))) {
+    return "EasyRead used backup mode because the model answer was cut off.";
+  }
   if (
-    lower.includes("cut off") ||
-    lower.includes("incomplete") ||
-    lower.includes("json") ||
-    lower.includes("fallback") ||
-    lower.includes("model problem") ||
-    lower.includes("backup answer")
+    lower.includes("easyread used fallback mode") &&
+    (lower.includes("json formatting failed") || lower.includes("json"))
   ) {
-    return "EasyRead had a model problem. This is a short backup answer.";
+    return "EasyRead used backup mode because model format was broken.";
+  }
+  if (
+    lower.includes("easyread used fallback mode") ||
+    lower.includes("easyread filled a backup explanation")
+  ) {
+    return "EasyRead used backup mode because of a model problem.";
   }
   if (lower.includes("no words above b1")) {
     return "EasyRead did not find clear hard words above B1.";
@@ -1755,24 +1969,94 @@ function buildLocalFallbackExplanation(selectedText) {
     return "EasyRead could not read this text.";
   }
 
-  const sentenceParts = normalized.split(/(?<=[.!?])\s+/).filter(Boolean);
-  const sample = sentenceParts.length > 0 ? sentenceParts.slice(0, 2).join(" ").trim() : normalized;
-  let simplified = applyEasyWordReplacements(sample)
-    .replace(/\s+/g, " ")
-    .trim();
+  const keywords = extractBackupKeywords(normalized, 5);
+  if (keywords.length >= 4) {
+    return `Quick meaning: This text explains ${keywords[0]} and ${keywords[1]}. It also talks about ${keywords[2]} and ${keywords[3]}.`;
+  }
+  if (keywords.length >= 2) {
+    return `Quick meaning: This text explains ${keywords[0]} and ${keywords[1]} in simple terms.`;
+  }
+  if (keywords.length === 1) {
+    return `Quick meaning: This text explains ${keywords[0]} and related ideas.`;
+  }
+  return "Quick meaning: This text explains a hard idea in simple terms.";
+}
 
-  if (!simplified) {
-    return "This text has hard words. Please choose a short part.";
+function extractBackupKeywords(text, maxCount = 5) {
+  const tokens = String(text || "")
+    .toLowerCase()
+    .match(/[a-z]+(?:'[a-z]+)?/g);
+  if (!tokens) {
+    return [];
   }
 
-  if (simplified.length > 420) {
-    simplified = `${simplified.slice(0, 420).trim()}...`;
+  const result = [];
+  const seen = new Set();
+  for (const token of tokens) {
+    if (token.length < 4 || BACKUP_SUMMARY_STOP_WORDS.has(token) || seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+    result.push(token);
+    if (result.length >= maxCount) {
+      break;
+    }
   }
-  if (!/[.!?]$/.test(simplified)) {
-    simplified = `${simplified}.`;
-  }
+  return result;
+}
 
-  return `Quick meaning: ${simplified}`;
+async function rescueExplanationOnlyResult({
+  selectedText,
+  clientId,
+  model,
+  explanationMode = DEFAULT_EXPLANATION_MODE,
+  candidates = [],
+  reasonHint = ""
+}) {
+  try {
+    const rescuePrompt = buildUserPrompt({
+      selectedText,
+      candidates: Array.isArray(candidates) ? candidates.slice(0, 20) : [],
+      wordLimit: Math.min(getWordResultLimit(selectedText.length), 8),
+      explanationMode
+    });
+    const correctionHint =
+      reasonHint === "copied_source"
+        ? "Do not copy the selected text. Rewrite the meaning in easier words and different sentence form."
+        : reasonHint === "missing_explanation"
+          ? "simple_explanation was empty. Return non-empty simple_explanation with at least 2 clear sentences in easy words."
+          : reasonHint === "bad_json"
+            ? "Your previous answer was not valid JSON. Return JSON only, no markdown, no extra text."
+            : "Previous answer returned no text. Return complete JSON with clear explanation now.";
+
+    const rescued = await callModelForEasyRead({
+      clientId,
+      model,
+      selectedTextLength: selectedText.length,
+      selectedTextForFallback: selectedText,
+      userPrompt: rescuePrompt,
+      explanationMode,
+      correctionHint
+    });
+
+    if (!hasText(rescued?.simple_explanation)) {
+      return null;
+    }
+    if (isExplanationTooCloseToSource(rescued.simple_explanation, selectedText)) {
+      return null;
+    }
+    return {
+      simple_explanation: rescued.simple_explanation,
+      a2_plus_words: [],
+      notes: rescued.notes || "",
+      confidence:
+        typeof rescued.confidence === "number" && Number.isFinite(rescued.confidence)
+          ? rescued.confidence
+          : 0.5
+    };
+  } catch (_error) {
+    return null;
+  }
 }
 
 function correctionHintIncludesNoCopy(correctionHint) {
