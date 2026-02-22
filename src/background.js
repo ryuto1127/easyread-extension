@@ -37,7 +37,7 @@ const MAX_CHUNK_CONCURRENCY = 2;
 const FAST_SINGLE_CALL_MAX_CHARS = 0;
 const inflightRequests = new Map();
 const B2_PLUS_LEVELS = new Set(["B2", "C1", "C2"]);
-const WORD_FETCH_TIMEOUT_MS = 14000;
+const WORD_FETCH_TIMEOUT_MS = 18000;
 const BACKUP_SUMMARY_STOP_WORDS = new Set([
   "about",
   "after",
@@ -554,16 +554,11 @@ async function handleFetchWordsRequest(payload, _sender) {
   let finalWordItems = keepB2PlusWords(words);
   let finalNotes = baseResult.notes || "";
   if (finalWordItems.length === 0) {
-    const localBackupWords = buildLocalWordFallbackEntries(
-      filteredCandidates.length > 0 ? filteredCandidates : candidates,
-      getWordResultLimit(selectedText.length)
+    finalWordItems = [];
+    finalNotes = appendNote(
+      finalNotes,
+      "EasyRead could not load word definitions now. Please try again."
     );
-    if (localBackupWords.length > 0) {
-      finalWordItems = localBackupWords;
-      finalNotes = appendNote(finalNotes, "EasyRead used backup word list because model word step failed.");
-    } else {
-      finalNotes = appendNote(finalNotes, "No words above B1 were detected with enough confidence.");
-    }
   }
 
   const finalResult = enforceEasyLanguage(
@@ -769,9 +764,12 @@ async function analyzeExplanationOnlySelection({
     model,
     systemPrompt: CORE_SYSTEM_PROMPT,
     userPrompt,
-    useSchema: false,
+    schema: EXPLANATION_ONLY_SCHEMA,
+    schemaName: "easyread_explanation_only",
+    useSchema: true,
     maxOutputTokens: tokenBudget,
-    maxAttempts: 1
+    maxAttempts: 1,
+    allowSchemaFallback: false
   }).catch(() => null);
 
   const rawText = extractOutputText(response);
@@ -1391,8 +1389,11 @@ Rules:
     model,
     systemPrompt,
     userPrompt,
-    useSchema: false,
-    maxAttempts: 1
+    schema: WORD_COVERAGE_SCHEMA,
+    schemaName: "easyread_word_coverage",
+    useSchema: true,
+    maxAttempts: 1,
+    allowSchemaFallback: false
   }).catch(() => null);
 
   const rawText = extractOutputText(response);
@@ -1691,7 +1692,8 @@ async function requestResponsesApi({
   schemaName = "easyread_output",
   useSchema = true,
   maxOutputTokens = MAX_OUTPUT_TOKENS,
-  maxAttempts = 1
+  maxAttempts = 1,
+  allowSchemaFallback = true
 }) {
   const payload = {
     model,
@@ -1724,6 +1726,7 @@ async function requestResponsesApi({
     return await postResponsesPayload({ clientId, payload, maxAttempts });
   } catch (error) {
     const schemaIssue =
+      allowSchemaFallback &&
       useSchema &&
       error instanceof EasyReadError &&
       error.code === "PROXY_ERROR" &&
