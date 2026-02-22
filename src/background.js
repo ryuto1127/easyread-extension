@@ -764,12 +764,9 @@ async function analyzeExplanationOnlySelection({
     model,
     systemPrompt: CORE_SYSTEM_PROMPT,
     userPrompt,
-    schema: EXPLANATION_ONLY_SCHEMA,
-    schemaName: "easyread_explanation_only",
-    useSchema: true,
+    useSchema: false,
     maxOutputTokens: tokenBudget,
-    maxAttempts: 1,
-    allowSchemaFallback: false
+    maxAttempts: 1
   }).catch(() => null);
 
   const rawText = extractOutputText(response);
@@ -788,32 +785,30 @@ async function analyzeExplanationOnlySelection({
   try {
     parsed = parseAndNormalizeResponse(rawText);
   } catch (_error) {
-    return {
-      parsed: buildLocalFallbackResult(
-        selectedText,
-        "EasyRead used fallback mode because model JSON formatting failed."
-      ),
-      candidateCount: candidates.length,
-      candidates
+    parsed = {
+      simple_explanation: normalizeModelExplanationText(rawText),
+      a2_plus_words: [],
+      notes: "",
+      confidence: 0.74
     };
   }
 
   if (!hasText(parsed.simple_explanation)) {
-    return {
-      parsed: buildLocalFallbackResult(
-        selectedText,
-        "EasyRead used fallback mode because the model returned empty explanation text."
-      ),
-      candidateCount: candidates.length,
-      candidates
-    };
+    parsed.simple_explanation = normalizeModelExplanationText(rawText);
+    parsed.confidence = Math.max(0.65, Number(parsed.confidence) || 0.65);
+  }
+
+  if (!hasText(parsed.simple_explanation)) {
+    parsed = buildLocalFallbackResult(
+      selectedText,
+      "EasyRead used fallback mode because the model returned empty explanation text."
+    );
   }
 
   if (isExplanationTooCloseToSource(parsed.simple_explanation, selectedText)) {
-    parsed = buildLocalFallbackResult(
-      selectedText,
-      "EasyRead used fallback mode because the model repeated the original text."
-    );
+    parsed.simple_explanation = buildLocalFallbackExplanation(selectedText);
+    parsed.notes = appendNote(parsed.notes || "", "EasyRead rewrote the text locally to keep it simple.");
+    parsed.confidence = Math.min(0.7, Number(parsed.confidence) || 0.7);
   }
 
   parsed = enforceEasyLanguage(
@@ -1389,11 +1384,8 @@ Rules:
     model,
     systemPrompt,
     userPrompt,
-    schema: WORD_COVERAGE_SCHEMA,
-    schemaName: "easyread_word_coverage",
-    useSchema: true,
-    maxAttempts: 1,
-    allowSchemaFallback: false
+    useSchema: false,
+    maxAttempts: 1
   }).catch(() => null);
 
   const rawText = extractOutputText(response);
@@ -1974,17 +1966,14 @@ function buildLocalFallbackExplanation(selectedText) {
     return "EasyRead could not read this text.";
   }
 
-  const keywords = extractBackupKeywords(normalized, 5);
-  if (keywords.length >= 4) {
-    return `Quick meaning: This text explains ${keywords[0]} and ${keywords[1]}. It also talks about ${keywords[2]} and ${keywords[3]}.`;
+  let simplified = applyEasyWordReplacements(normalized).replace(/\s+/g, " ").trim();
+  if (!simplified) {
+    return "This text talks about people, actions, and ideas.";
   }
-  if (keywords.length >= 2) {
-    return `Quick meaning: This text explains ${keywords[0]} and ${keywords[1]} in simple terms.`;
+  if (simplified.length > 1200) {
+    simplified = `${simplified.slice(0, 1200).trim()}...`;
   }
-  if (keywords.length === 1) {
-    return `Quick meaning: This text explains ${keywords[0]} and related ideas.`;
-  }
-  return "Quick meaning: This text explains a hard idea in simple terms.";
+  return simplified;
 }
 
 function extractBackupKeywords(text, maxCount = 5) {
@@ -2008,6 +1997,26 @@ function extractBackupKeywords(text, maxCount = 5) {
     }
   }
   return result;
+}
+
+function normalizeModelExplanationText(rawText) {
+  const raw = String(rawText || "").trim();
+  if (!raw) {
+    return "";
+  }
+  let cleaned = raw
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .replace(/^["']+|["']+$/g, "")
+    .trim();
+  cleaned = cleaned.replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return "";
+  }
+  if (cleaned.length > 1500) {
+    cleaned = `${cleaned.slice(0, 1500).trim()}...`;
+  }
+  return cleaned;
 }
 
 async function rescueExplanationOnlyResult({
