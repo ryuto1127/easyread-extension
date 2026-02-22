@@ -25,9 +25,9 @@ const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
 const DEFAULT_EXPLANATION_MODE = "balanced";
 const MODEL_NANO_MAX_CHARS = 1800;
 const MAX_A2_CANDIDATES = 48;
-const MAX_OUTPUT_TOKENS = 1200;
-const MAX_OUTPUT_TOKENS_RETRY = 2400;
-const MAX_EXPLAIN_ATTEMPTS = 2;
+const MAX_OUTPUT_TOKENS = 1800;
+const MAX_OUTPUT_TOKENS_RETRY = 6000;
+const MAX_EXPLAIN_ATTEMPTS = 4;
 const HARD_MAX_CHARS = 12000;
 const CHUNK_THRESHOLD_CHARS = 4500;
 const CHUNK_SIZE_CHARS = 1600;
@@ -628,7 +628,7 @@ async function analyzeExplanationOnlySelection({
       systemPrompt: CORE_SYSTEM_PROMPT,
       userPrompt,
       useSchema: false,
-      maxOutputTokens: Math.max(tokenBudget, 900)
+      maxOutputTokens: Math.max(tokenBudget, Math.min(MAX_OUTPUT_TOKENS_RETRY, 3200))
     });
     rawText = extractOutputText(response);
   }
@@ -1017,27 +1017,27 @@ function getOutputTokenBudget({ model, selectedTextLength, explanationMode = DEF
 
   if (model === MODEL_SHORT_TEXT) {
     if (selectedTextLength <= 180) {
-      budget = 800;
+      budget = 1200;
     } else if (selectedTextLength <= 700) {
-      budget = 950;
+      budget = 1500;
     } else {
-      budget = 1150;
+      budget = 1800;
     }
   } else if (selectedTextLength <= 700) {
-    budget = 1100;
+    budget = 1700;
   } else if (selectedTextLength <= 1800) {
-    budget = 1400;
+    budget = 2200;
   } else {
-    budget = 1650;
+    budget = 2800;
   }
 
   if (mode === "simple") {
-    budget -= 120;
+    budget -= 160;
   } else if (mode === "detailed") {
-    budget += 220;
+    budget += 300;
   }
 
-  return Math.max(650, budget);
+  return Math.max(1000, budget);
 }
 
 function getExplanationOnlyTokenBudget(selectionLength, explanationMode = DEFAULT_EXPLANATION_MODE) {
@@ -1045,20 +1045,20 @@ function getExplanationOnlyTokenBudget(selectionLength, explanationMode = DEFAUL
   let budget;
 
   if (selectionLength <= 320) {
-    budget = 700;
+    budget = 1200;
   } else if (selectionLength <= 1200) {
-    budget = 900;
+    budget = 1600;
   } else {
-    budget = 1100;
+    budget = 2100;
   }
 
   if (mode === "simple") {
-    budget -= 120;
+    budget -= 160;
   } else if (mode === "detailed") {
-    budget += 220;
+    budget += 300;
   }
 
-  return Math.max(600, budget);
+  return Math.max(1000, budget);
 }
 
 function normalizeWordKey(word) {
@@ -1302,7 +1302,7 @@ Rules:
       systemPrompt,
       userPrompt,
       useSchema: false,
-      maxOutputTokens: 900
+      maxOutputTokens: 2000
     });
     rawText = extractOutputText(rescueResponse);
   }
@@ -1321,7 +1321,7 @@ Rules:
           systemPrompt,
           userPrompt,
           useSchema: false,
-          maxOutputTokens: 900
+          maxOutputTokens: 2000
         });
         const rescueRawText = extractOutputText(rescueResponse);
         if (rescueRawText) {
@@ -1991,7 +1991,7 @@ ${correctionHint}`.trim();
       systemPrompt: CORE_SYSTEM_PROMPT,
       userPrompt: rescuePrompt,
       useSchema: false,
-      maxOutputTokens: Math.max(getExplanationOnlyTokenBudget(selectedText.length, explanationMode), 900)
+      maxOutputTokens: Math.max(getExplanationOnlyTokenBudget(selectedText.length, explanationMode), 2400)
     });
     const rescueText = extractOutputText(rescueResponse);
     if (!rescueText) {
