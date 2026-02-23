@@ -27,6 +27,9 @@ const MAX_OUTPUT_TOKENS = 1200;
 const HARD_MAX_CHARS = 12000;
 const B2_PLUS_LEVELS = new Set(["B2", "C1", "C2"]);
 const WORD_FETCH_TIMEOUT_MS = 18000;
+const WORD_MAX_OUTPUT_TOKENS = 1800;
+const WORD_RECOVERY_OUTPUT_TOKENS = 1200;
+const WORD_LOCAL_FALLBACK_MAX = 8;
 const WORD_COVERAGE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -348,6 +351,7 @@ async function handleFetchWordsRequest(payload, _sender) {
     };
   }
 
+  const wordLimit = getWordResultLimit(selectedText.length);
   let words = [];
   try {
     words = await withTimeout(
@@ -356,7 +360,7 @@ async function handleFetchWordsRequest(payload, _sender) {
         model: selectedModel,
         selectedText,
         candidateHints: candidates,
-        wordLimit: getWordResultLimit(selectedText.length)
+        wordLimit
       }),
       WORD_FETCH_TIMEOUT_MS
     );
@@ -364,15 +368,10 @@ async function handleFetchWordsRequest(payload, _sender) {
     words = [];
   }
 
-  let finalWordItems = keepB2PlusWords(words);
+  let finalWordItems = normalizeAndCompleteWordEntries(words, candidates, wordLimit);
   let finalNotes = baseResult.notes || "";
   if (finalWordItems.length === 0) {
-    throw new EasyReadError(
-      candidates.length > 0
-        ? "Words could not load now. Please click Explain again."
-        : "No words above B1 found.",
-      "WORDS_UNAVAILABLE"
-    );
+    finalNotes = appendNote(finalNotes, "EasyRead could not find clear words above B1 in this text.");
   }
 
   const finalResult = enforceEasyLanguage(
@@ -712,6 +711,165 @@ function keepB2PlusWords(entries) {
   return (entries || []).filter(isB2PlusWordEntry);
 }
 
+function normalizeAndCompleteWordEntries(entries, candidates = [], wordLimit = 12) {
+  const normalized = normalizeWordEntriesWithFallback(entries, wordLimit);
+  if (normalized.length > 0) {
+    return normalized;
+  }
+  return buildLocalWordFallbackEntries(candidates, wordLimit);
+}
+
+function normalizeWordEntriesWithFallback(entries, wordLimit = 12) {
+  const safeLimit = Math.max(1, Math.min(Number(wordLimit) || 12, 16));
+  const seen = new Set();
+  const result = [];
+
+  for (const item of Array.isArray(entries) ? entries : []) {
+    const word = String(item?.word || "").trim();
+    if (!word) {
+      continue;
+    }
+    const key = normalizeWordKey(word);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    const lemma = normalizeLemma(item?.lemma || word);
+    const pos = normalizePosValue(item?.pos, word);
+    const cefr = normalizeCefrB2Plus(item?.cefr);
+    const definition = hasText(item?.definition_simple)
+      ? String(item.definition_simple).trim()
+      : buildLocalDefinition(word, lemma);
+    const example = hasText(item?.example_simple)
+      ? String(item.example_simple).trim()
+      : buildLocalExample(word, definition);
+
+    result.push({
+      word,
+      lemma,
+      pos,
+      cefr,
+      definition_simple: definition,
+      example_simple: example
+    });
+
+    if (result.length >= safeLimit) {
+      break;
+    }
+  }
+
+  return keepB2PlusWords(result);
+}
+
+function buildLocalWordFallbackEntries(candidates, wordLimit = 12) {
+  const safeLimit = Math.max(1, Math.min(Number(wordLimit) || WORD_LOCAL_FALLBACK_MAX, WORD_LOCAL_FALLBACK_MAX));
+  const seen = new Set();
+  const result = [];
+
+  for (const raw of Array.isArray(candidates) ? candidates : []) {
+    const word = String(raw || "").trim();
+    if (!word) {
+      continue;
+    }
+    const key = normalizeWordKey(word);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    const lemma = normalizeLemma(word);
+    const definition = buildLocalDefinition(word, lemma);
+    result.push({
+      word,
+      lemma,
+      pos: normalizePosValue("", word),
+      cefr: "B2",
+      definition_simple: definition,
+      example_simple: buildLocalExample(word, definition)
+    });
+
+    if (result.length >= safeLimit) {
+      break;
+    }
+  }
+
+  return keepB2PlusWords(result);
+}
+
+function normalizeLemma(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) {
+    return "";
+  }
+  if (text.endsWith("ies") && text.length > 4) {
+    return `${text.slice(0, -3)}y`;
+  }
+  if (text.endsWith("ing") && text.length > 5) {
+    return text.slice(0, -3);
+  }
+  if (text.endsWith("ed") && text.length > 4) {
+    return text.slice(0, -2);
+  }
+  if (text.endsWith("es") && text.length > 4) {
+    return text.slice(0, -2);
+  }
+  if (text.endsWith("s") && text.length > 3) {
+    return text.slice(0, -1);
+  }
+  return text;
+}
+
+function normalizePosValue(pos, word) {
+  const normalized = String(pos || "").trim().toLowerCase();
+  const allowed = new Set(["noun", "verb", "adj", "adv", "prep", "pron", "det", "conj", "other"]);
+  if (allowed.has(normalized)) {
+    return normalized;
+  }
+  const value = normalizeWordKey(word);
+  if (!value) {
+    return "other";
+  }
+  if (value.endsWith("ly")) {
+    return "adv";
+  }
+  if (/(ing|ed|en|ize|ise|ify)$/.test(value)) {
+    return "verb";
+  }
+  if (/(ous|ful|less|able|ible|al|ic|ive)$/.test(value)) {
+    return "adj";
+  }
+  if (/(tion|sion|ment|ness|ity|ship)$/.test(value)) {
+    return "noun";
+  }
+  return "other";
+}
+
+function normalizeCefrB2Plus(value) {
+  const cefr = String(value || "").trim().toUpperCase();
+  if (B2_PLUS_LEVELS.has(cefr)) {
+    return cefr;
+  }
+  return "B2";
+}
+
+function buildLocalDefinition(word, lemma) {
+  const key = normalizeWordKey(word);
+  const base = EASY_WORD_REPLACEMENTS[key] || EASY_WORD_REPLACEMENTS[lemma] || "";
+  if (base) {
+    return `In this text, this word means ${base}.`;
+  }
+  return "In this text, this word has a special meaning.";
+}
+
+function buildLocalExample(word, definition) {
+  const core = String(definition || "").replace(/^In this text,\s*/i, "").trim();
+  if (core) {
+    return `In this text, "${word}" means ${core.toLowerCase()}`;
+  }
+  return `In this text, "${word}" has a special meaning.`;
+}
+
 async function callModelForB2PlusWords({
   clientId,
   model,
@@ -754,17 +912,56 @@ Rules:
     schema: WORD_COVERAGE_SCHEMA,
     schemaName: "easyread_word_coverage",
     useSchema: true,
-    maxAttempts: 1,
-    allowSchemaFallback: false
+    maxOutputTokens: WORD_MAX_OUTPUT_TOKENS,
+    maxAttempts: 2,
+    allowSchemaFallback: true
   }).catch(() => null);
 
   const rawText = extractOutputText(response);
-  if (!rawText) {
+  if (rawText) {
+    try {
+      const parsed = parseAndNormalizeWordCoverage(rawText);
+      if (parsed.length > 0) {
+        return parsed;
+      }
+    } catch (_error) {
+      // continue to recovery pass
+    }
+  }
+
+  const recoveryPrompt = `
+Return JSON only with key "a2_plus_words".
+If you are unsure, return fewer items, but ensure each item is complete.
+
+Selected text:
+"""${selectedText}"""
+
+Candidate hints:
+${JSON.stringify(candidateHints || [])}
+
+Rules:
+1) Return at most ${Math.max(4, Math.min(wordLimit, 8))} items.
+2) Include only words above B1 (B2/C1/C2).
+3) Each item must include: word, lemma, pos, cefr, definition_simple, example_simple.
+4) definition_simple and example_simple must be non-empty.
+5) Do not include names unless they are true difficult vocabulary.
+`;
+  const recoveryResponse = await requestResponsesApi({
+    clientId,
+    model,
+    systemPrompt,
+    userPrompt: recoveryPrompt,
+    useSchema: false,
+    maxOutputTokens: WORD_RECOVERY_OUTPUT_TOKENS,
+    maxAttempts: 1
+  }).catch(() => null);
+  const recoveryText = extractOutputText(recoveryResponse);
+  if (!recoveryText) {
     return [];
   }
 
   try {
-    return parseAndNormalizeWordCoverage(rawText);
+    return parseAndNormalizeWordCoverage(recoveryText);
   } catch (_error) {
     return [];
   }
