@@ -28,5 +28,4 @@ npm run start:env
 - `RATE_LIMIT_MAX_PER_DAY` (default `300`)
 
 Model policy is fixed in code and only allows:
-- `gpt-5-nano`
 - `gpt-5-mini`

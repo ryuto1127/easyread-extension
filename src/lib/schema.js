@@ -58,6 +58,39 @@ function extractJsonObject(text) {
   return text.slice(start, end + 1);
 }
 
+function extractJsonArray(text) {
+  const start = text.indexOf("[");
+  const end = text.lastIndexOf("]");
+  if (start < 0 || end < 0 || end <= start) {
+    throw new Error("No JSON array found in model output.");
+  }
+  return text.slice(start, end + 1);
+}
+
+function tryParseJsonFlexible(rawText) {
+  const source = String(rawText || "").trim();
+  if (!source) {
+    throw new Error("Empty model output.");
+  }
+
+  try {
+    return JSON.parse(source);
+  } catch (_directError) {
+    // Common fence format from non-schema outputs.
+    const unfenced = source.replace(/```json/gi, "").replace(/```/g, "").trim();
+    try {
+      return JSON.parse(unfenced);
+    } catch (_unfencedError) {
+      // Try object snippet first, then array snippet.
+      try {
+        return JSON.parse(extractJsonObject(unfenced));
+      } catch (_objectError) {
+        return JSON.parse(extractJsonArray(unfenced));
+      }
+    }
+  }
+}
+
 export function extractOutputText(responseJson) {
   if (typeof responseJson?.output_text === "string" && responseJson.output_text.trim()) {
     return responseJson.output_text.trim();
@@ -76,12 +109,7 @@ export function extractOutputText(responseJson) {
 }
 
 export function parseAndNormalizeResponse(rawText) {
-  let parsed;
-  try {
-    parsed = JSON.parse(rawText);
-  } catch (_err) {
-    parsed = JSON.parse(extractJsonObject(rawText));
-  }
+  const parsed = tryParseJsonFlexible(rawText);
 
   if (!parsed || typeof parsed !== "object") {
     throw new Error("Parsed result is not an object.");
@@ -98,18 +126,29 @@ export function parseAndNormalizeResponse(rawText) {
 }
 
 export function parseAndNormalizeWordCoverage(rawText) {
-  let parsed;
-  try {
-    parsed = JSON.parse(rawText);
-  } catch (_err) {
-    parsed = JSON.parse(extractJsonObject(rawText));
+  const parsed = tryParseJsonFlexible(rawText);
+
+  if (Array.isArray(parsed)) {
+    return normalizeWordEntries(parsed);
   }
 
   if (!parsed || typeof parsed !== "object") {
     throw new Error("Parsed result is not an object.");
   }
 
-  return normalizeWordEntries(parsed.a2_plus_words);
+  const candidates = [
+    parsed.a2_plus_words,
+    parsed.words,
+    parsed.word_list,
+    parsed.items
+  ];
+  for (const value of candidates) {
+    if (Array.isArray(value)) {
+      return normalizeWordEntries(value);
+    }
+  }
+
+  return [];
 }
 
 export function isOutputUsable(result) {

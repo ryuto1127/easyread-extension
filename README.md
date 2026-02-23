@@ -18,10 +18,8 @@ EasyRead is a Manifest V3 Chrome extension that explains selected text in simple
 - Buttons: `Copy`, `Pin/Unpin`, `Close`
 - Local-only cache (7-day TTL)
 - Explanation length auto-scales with selection length
-- Long selections are automatically processed in chunks (up to 12,000 chars)
-- Auto model routing:
-  - `gpt-5-nano` for short selections (`<= 1200` chars)
-  - `gpt-5-mini` for longer selections (`> 1200` chars)
+- Supports selections up to 12,000 characters
+- Fixed model: `gpt-5-mini`
 - Backend rate limiting (per anonymous client ID + IP)
 
 ## Backend Setup

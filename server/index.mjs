@@ -3,12 +3,7 @@ import { URL } from "node:url";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const MAX_BODY_BYTES = 512 * 1024;
-const DEFAULT_ALLOWED_MODELS = ["gpt-5-nano", "gpt-5-mini"];
-const ALLOWED_MODELS = new Set(
-  splitCsv(process.env.ALLOWED_MODELS).length > 0
-    ? splitCsv(process.env.ALLOWED_MODELS)
-    : DEFAULT_ALLOWED_MODELS
-);
+const ALLOWED_MODEL = "gpt-5-mini";
 const RENDER_BASE_URL = "https://easyread-extension.onrender.com";
 
 const config = {
@@ -93,8 +88,8 @@ async function handleExplain(req, res) {
   }
 
   const model = String(payload.model || "").trim();
-  if (!ALLOWED_MODELS.has(model)) {
-    sendJson(res, 400, { error: "Model is not allowed. Use gpt-5-nano or gpt-5-mini." });
+  if (model !== ALLOWED_MODEL) {
+    sendJson(res, 400, { error: "Model is not allowed. Use gpt-5-mini." });
     return;
   }
   payload.model = model;
