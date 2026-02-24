@@ -329,7 +329,7 @@
       return;
     }
 
-    wordsPanel.textContent = isPending ? "Loading difficult words..." : "No words above B1 found.";
+    wordsPanel.textContent = isPending ? "Loading difficult words..." : "No C1+ words found.";
   }
 
   function getRenderableWords(words) {
@@ -487,7 +487,7 @@
 
     if (wordItems.length > 0) {
       lines.push("");
-      lines.push("Words above B1:");
+      lines.push("Words (C1+):");
       for (const item of wordItems) {
         lines.push(
           `- ${item.word} (${item.lemma}, ${item.pos}, ${item.cefr}): ${item.definition_simple} Example: ${item.example_simple}`

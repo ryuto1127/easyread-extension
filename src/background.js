@@ -22,12 +22,12 @@ const CONTEXT_MENU_ID = "easyread_explain";
 const EXPLAIN_MODEL = "gpt-5-mini";
 const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
 const DEFAULT_EXPLANATION_MODE = "balanced";
-const MAX_A2_CANDIDATES = 48;
+const MAX_A2_CANDIDATES = 28;
 const MAX_OUTPUT_TOKENS = 2600;
 const HARD_MAX_CHARS = 20000;
-const B2_PLUS_LEVELS = new Set(["B2", "C1", "C2"]);
-const WORD_FETCH_TIMEOUT_MS = 30000;
-const WORD_MAX_OUTPUT_TOKENS = 3200;
+const C1_PLUS_LEVELS = new Set(["C1", "C2"]);
+const WORD_FETCH_TIMEOUT_MS = 20000;
+const WORD_MAX_OUTPUT_TOKENS = 1800;
 const POS_VALUE_SET = new Set(["noun", "verb", "adj", "adv", "prep", "pron", "det", "conj", "other"]);
 const LOW_VALUE_WORD_SET = new Set([
   "a",
@@ -123,7 +123,7 @@ Always output valid JSON only.
 Write clear and natural English that is easy to understand.
 Give enough detail so the learner can understand difficult text without opening another tab.
 Stay faithful to the selected text and do not invent details.
-Identify words above B1 (B2/C1/C2) in the selected text and return short clear meanings and examples.
+Identify words at C1 or C2 level in the selected text and return short clear meanings and examples.
 If the input is unclear or too long, explain that in notes and lower confidence.
 `;
 
@@ -363,7 +363,7 @@ async function handleFetchWordsRequest(payload, _sender) {
       {
         ...baseResult,
         a2_plus_words: [],
-        notes: appendNote(baseResult.notes || "", "No words above B1 were detected with enough confidence.")
+        notes: appendNote(baseResult.notes || "", "No C1+ words were detected with enough confidence.")
       },
       selectedText
     );
@@ -406,7 +406,7 @@ async function handleFetchWordsRequest(payload, _sender) {
   let finalWordItems = normalizeAndCompleteWordEntries(words, wordLimit);
   let finalNotes = baseResult.notes || "";
   if (finalWordItems.length === 0) {
-    finalNotes = appendNote(finalNotes, "EasyRead could not find clear words above B1 in this text.");
+    finalNotes = appendNote(finalNotes, "EasyRead could not find clear C1+ words in this text.");
   }
 
   const finalResult = enforceEasyLanguage(
@@ -625,74 +625,74 @@ function getExplanationLengthGuidance(selectionLength, explanationMode) {
   const mode = normalizeExplanationMode(explanationMode);
   if (mode === "simple") {
     if (selectionLength <= 120) {
-      return "Write 2 to 3 short sentences.";
+      return "Write 1 to 2 short sentences.";
     }
     if (selectionLength <= 320) {
-      return "Write 3 to 4 short sentences.";
+      return "Write 2 to 3 short sentences.";
     }
     if (selectionLength <= 700) {
-      return "Write 3 to 5 short sentences.";
+      return "Write 3 to 4 short sentences.";
     }
-    return "Write 4 to 6 short sentences.";
+    return "Write 4 to 5 short sentences.";
   }
 
   if (mode === "detailed") {
     if (selectionLength <= 120) {
-      return "Write 3 to 4 sentences with key detail.";
+      return "Write 2 to 3 sentences with key detail.";
     }
     if (selectionLength <= 320) {
-      return "Write 4 to 6 sentences.";
+      return "Write 3 to 4 sentences.";
     }
     if (selectionLength <= 700) {
-      return "Write 5 to 7 sentences.";
+      return "Write 4 to 5 sentences.";
     }
-    return "Write 6 to 8 sentences.";
+    return "Write 5 to 6 sentences.";
   }
 
   if (selectionLength <= 120) {
-    return "Write 2 to 3 short sentences.";
+    return "Write 1 to 2 short sentences.";
   }
   if (selectionLength <= 320) {
-    return "Write 3 to 5 sentences.";
+    return "Write 2 to 4 sentences.";
   }
   if (selectionLength <= 700) {
-    return "Write 4 to 6 sentences.";
+    return "Write 3 to 5 sentences.";
   }
-  return "Write 5 to 7 sentences.";
+  return "Write 4 to 6 sentences.";
 }
 
 function getWordResultLimit(selectionLength) {
   if (selectionLength <= 180) {
-    return 8;
+    return 4;
   }
   if (selectionLength <= 500) {
-    return 10;
+    return 6;
   }
   if (selectionLength <= 1200) {
-    return 12;
+    return 8;
   }
-  return 14;
+  return 10;
 }
 
 function getExplanationOnlyTokenBudget(selectionLength, explanationMode = DEFAULT_EXPLANATION_MODE) {
   const mode = normalizeExplanationMode(explanationMode);
   let budget;
 
-  if (selectionLength <= 320) {
-    budget = 2200;
-  } else if (selectionLength <= 1200) {
-    budget = 3200;
+  if (selectionLength <= 260) {
+    budget = 1400;
+  } else if (selectionLength <= 900) {
+    budget = 2100;
   } else {
-    budget = 4200;
+    budget = 3000;
   }
 
   if (mode === "simple") {
-    budget -= 200;
+    budget -= 150;
   } else if (mode === "detailed") {
-    budget += 300;
+    budget += 250;
   }
 
-  return Math.max(1600, budget);
+  return Math.max(1200, budget);
 }
 
 function normalizeWordKey(word) {
@@ -706,16 +706,16 @@ function hasText(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function isB2PlusWordEntry(item) {
+function isC1PlusWordEntry(item) {
   if (!item || typeof item !== "object") {
     return false;
   }
   const cefr = String(item.cefr || "").toUpperCase();
-  return B2_PLUS_LEVELS.has(cefr) && hasText(item.definition_simple) && hasText(item.example_simple);
+  return C1_PLUS_LEVELS.has(cefr) && hasText(item.definition_simple) && hasText(item.example_simple);
 }
 
-function keepB2PlusWords(entries) {
-  return (entries || []).filter(isB2PlusWordEntry);
+function keepC1PlusWords(entries) {
+  return (entries || []).filter(isC1PlusWordEntry);
 }
 
 function normalizeAndCompleteWordEntries(entries, wordLimit = 12) {
@@ -743,7 +743,7 @@ function normalizeWordEntriesWithFallback(entries, wordLimit = 12) {
       continue;
     }
     const pos = normalizePosValue(item?.pos, word);
-    const cefr = normalizeCefrB2Plus(item?.cefr);
+    const cefr = normalizeCefrC1Plus(item?.cefr);
     const definition = hasText(item?.definition_simple) ? String(item.definition_simple).trim() : "";
     const example = hasText(item?.example_simple) ? String(item.example_simple).trim() : "";
 
@@ -761,7 +761,7 @@ function normalizeWordEntriesWithFallback(entries, wordLimit = 12) {
     }
   }
 
-  return keepB2PlusWords(result);
+  return keepC1PlusWords(result);
 }
 
 function normalizeLemma(value) {
@@ -820,12 +820,12 @@ function normalizePosValue(pos, word) {
   return "other";
 }
 
-function normalizeCefrB2Plus(value) {
+function normalizeCefrC1Plus(value) {
   const cefr = String(value || "").trim().toUpperCase();
-  if (B2_PLUS_LEVELS.has(cefr)) {
+  if (C1_PLUS_LEVELS.has(cefr)) {
     return cefr;
   }
-  return "B2";
+  return "C1";
 }
 
 function isLikelyProperNameWord(word) {
@@ -861,7 +861,7 @@ async function callModelForB2PlusWords({
   const systemPrompt = `
 You extract difficult words and explain them for learners.
 Return JSON only.
-Return only words above B1 (B2, C1, C2).
+Return only words at C1 or C2 level.
 Include any part of speech: noun, verb, adjective, adverb, preposition, pronoun, determiner, conjunction.
 `;
   const userPrompt = `
@@ -874,10 +874,10 @@ Candidate hints (not all are hard enough):
 ${JSON.stringify(candidateHints || [])}
 
 Rules:
-1) Include the most useful words above B1 that appear in the selected text.
+1) Include the most useful C1/C2 words that appear in the selected text.
 2) Return at most ${wordLimit} entries.
-3) Do not include A1, A2, or B1 words.
-4) Set cefr only to B2, C1, or C2.
+3) Do not include A1, A2, B1, or B2 words.
+4) Set cefr only to C1 or C2.
 5) Fill lemma, pos, cefr, definition_simple, example_simple.
 6) definition_simple and example_simple must not be empty.
 7) definition_simple must explain the word in this context in at least 5 words.
@@ -1170,7 +1170,7 @@ function simplifyNoteText(note) {
     return "";
   }
   if (lower.includes("no words above b1")) {
-    return "EasyRead did not find clear hard words above B1.";
+    return "EasyRead did not find clear C1+ words.";
   }
 
   return simplifyToEasyText(raw, "");
