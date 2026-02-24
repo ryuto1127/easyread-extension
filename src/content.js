@@ -196,6 +196,7 @@
   }
 
   async function runExplain(explicitText = "", options = {}) {
+    const isRefine = Boolean(options.isRefine);
     const requestedMode = normalizeExplanationMode(options.explanationMode || state.explanationMode);
     state.explanationMode = requestedMode;
     updateModeButtons();
@@ -214,13 +215,16 @@
     }
 
     state.lastSelectionText = selectedText;
+    const existingWords = Array.isArray(state.lastResult?.a2_plus_words)
+      ? state.lastResult.a2_plus_words
+      : [];
     const requestId = createRequestId();
     state.currentRequestId = requestId;
     showOverlay();
     if (selectedText.length > CHUNK_THRESHOLD_CHARS) {
       showStatus("Large text detected. Creating explanation first...");
     }
-    setLoading(true, requestedMode, Boolean(options.isRefine));
+    setLoading(true, requestedMode, isRefine);
 
     try {
       const response = await sendRuntimeMessage({
@@ -242,12 +246,24 @@
         return;
       }
 
-      state.lastResult = response.data?.result || null;
+      let nextResult = response.data?.result || null;
+      if (isRefine && nextResult && typeof nextResult === "object") {
+        const nextWords = Array.isArray(nextResult.a2_plus_words) ? nextResult.a2_plus_words : [];
+        if (nextWords.length === 0 && existingWords.length > 0) {
+          nextResult = {
+            ...nextResult,
+            a2_plus_words: existingWords
+          };
+        }
+      }
+
+      state.lastResult = nextResult;
+      const shouldFetchWords = !isRefine && Boolean(response.data?.wordsPending);
       renderResult(state.lastResult, response.data?.cached, {
-        wordsPending: Boolean(response.data?.wordsPending),
+        wordsPending: shouldFetchWords,
         explanationMode: requestedMode
       });
-      if (response.data?.wordsPending) {
+      if (shouldFetchWords) {
         void fetchWordsForCurrentRequest({
           requestId,
           selectedText,
@@ -438,7 +454,10 @@
       const modeLabel = getModeLabel(explanationMode);
       showStatus(isRefine ? `Updating (${modeLabel})...` : `Working (${modeLabel})...`);
       explanationPanel.innerHTML = '<div class="easyread-loading">Creating explanation</div>';
-      wordsPanel.textContent = "";
+      const hasExistingWords = getRenderableWords(state.lastResult?.a2_plus_words).length > 0;
+      if (!isRefine || !hasExistingWords) {
+        wordsPanel.textContent = "";
+      }
     } else if (
       !statusEl.textContent ||
       statusEl.textContent.startsWith("Working (") ||
