@@ -96,11 +96,27 @@ export function extractOutputText(responseJson) {
     return responseJson.output_text.trim();
   }
 
+  if (typeof responseJson?.text === "string" && responseJson.text.trim()) {
+    return responseJson.text.trim();
+  }
+
   const chunks = [];
   for (const outputItem of responseJson?.output || []) {
     for (const contentItem of outputItem?.content || []) {
       if (typeof contentItem?.text === "string") {
         chunks.push(contentItem.text);
+        continue;
+      }
+      if (typeof contentItem?.text?.value === "string") {
+        chunks.push(contentItem.text.value);
+        continue;
+      }
+      if (typeof contentItem?.output_text === "string") {
+        chunks.push(contentItem.output_text);
+        continue;
+      }
+      if (typeof contentItem?.json === "object" && contentItem.json) {
+        chunks.push(JSON.stringify(contentItem.json));
       }
     }
   }

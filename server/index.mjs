@@ -10,6 +10,7 @@ const config = {
   port: toInt(process.env.PORT, 8787),
   openAiKey: process.env.OPENAI_API_KEY || "",
   allowedExtensionIds: splitCsv(process.env.ALLOWED_EXTENSION_IDS),
+  maxProxyOutputTokens: toInt(process.env.MAX_PROXY_OUTPUT_TOKENS, 8192),
   rateWindowMs: toInt(process.env.RATE_LIMIT_WINDOW_MS, 60_000),
   rateWindowMax: toInt(process.env.RATE_LIMIT_MAX_PER_WINDOW, 20),
   rateDayMax: toInt(process.env.RATE_LIMIT_MAX_PER_DAY, 300)
@@ -187,8 +188,9 @@ function sanitizeResponsesPayload(payload) {
   delete next.frequency_penalty;
   delete next.presence_penalty;
 
+  const safeMaxProxyOutputTokens = Math.max(256, Math.min(16384, Math.floor(config.maxProxyOutputTokens)));
   if (typeof next.max_output_tokens === "number") {
-    next.max_output_tokens = Math.max(64, Math.min(3200, Math.floor(next.max_output_tokens)));
+    next.max_output_tokens = Math.max(64, Math.min(safeMaxProxyOutputTokens, Math.floor(next.max_output_tokens)));
   }
 
   return next;

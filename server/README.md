@@ -23,6 +23,7 @@ npm run start:env
 - `OPENAI_API_KEY` (required)
 - `PORT` (default `8787`)
 - `ALLOWED_EXTENSION_IDS` (optional CSV)
+- `MAX_PROXY_OUTPUT_TOKENS` (default `8192`)
 - `RATE_LIMIT_WINDOW_MS` (default `60000`)
 - `RATE_LIMIT_MAX_PER_WINDOW` (default `20`)
 - `RATE_LIMIT_MAX_PER_DAY` (default `300`)

@@ -1,4 +1,24 @@
 const TOKEN_REGEX = /[A-Za-z]+(?:'[A-Za-z]+)?/g;
+const IRREGULAR_BASE_FORMS = new Map([
+  ["am", "be"],
+  ["are", "be"],
+  ["is", "be"],
+  ["was", "be"],
+  ["were", "be"],
+  ["been", "be"],
+  ["being", "be"],
+  ["has", "have"],
+  ["had", "have"],
+  ["having", "have"],
+  ["does", "do"],
+  ["did", "do"],
+  ["done", "do"],
+  ["went", "go"],
+  ["gone", "go"],
+  ["got", "get"],
+  ["getting", "get"],
+  ["made", "make"]
+]);
 
 function normalizeToken(token) {
   return token
@@ -11,12 +31,18 @@ function isNumberLike(token) {
   return /^[0-9]+([.,][0-9]+)?$/.test(token);
 }
 
-function looksLikeProperNoun(token) {
+function looksLikeProperNoun(token, easyWordSet) {
   if (!token) {
     return false;
   }
   if (/^[A-Z]{2,}$/.test(token)) {
     return true;
+  }
+  if (/^[A-Z][a-z]{2,}$/.test(token)) {
+    const lower = token.toLowerCase();
+    if (!easyWordSet || !easyWordSet.has(lower)) {
+      return true;
+    }
   }
   return /^[A-Z][a-z]+(?:-[A-Z][a-z]+)+$/.test(token);
 }
@@ -28,6 +54,11 @@ function isAllowedVariation(token, easyWordSet) {
   }
 
   if (easyWordSet.has(lower)) {
+    return true;
+  }
+
+  const irregularBase = IRREGULAR_BASE_FORMS.get(lower);
+  if (irregularBase && easyWordSet.has(irregularBase)) {
     return true;
   }
 
@@ -72,7 +103,7 @@ export function findHardWords(text, easyWordSet) {
   const hardWords = new Set();
 
   for (const token of words) {
-    if (token.length <= 2 || isNumberLike(token) || looksLikeProperNoun(token)) {
+    if (token.length <= 2 || isNumberLike(token) || looksLikeProperNoun(token, easyWordSet)) {
       continue;
     }
 
@@ -123,7 +154,7 @@ export function extractA2PlusCandidates(selectedText, easyWordSet, maxCount = 24
   const candidates = new Map();
 
   for (const token of words) {
-    if (token.length <= 2 || looksLikeProperNoun(token)) {
+    if (token.length <= 2 || looksLikeProperNoun(token, easyWordSet)) {
       continue;
     }
     const normalized = normalizeToken(token);

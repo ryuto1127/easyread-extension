@@ -23,19 +23,75 @@ const EXPLAIN_MODEL = "gpt-5-mini";
 const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
 const DEFAULT_EXPLANATION_MODE = "balanced";
 const MAX_A2_CANDIDATES = 48;
-const MAX_OUTPUT_TOKENS = 1200;
-const HARD_MAX_CHARS = 12000;
+const MAX_OUTPUT_TOKENS = 2600;
+const HARD_MAX_CHARS = 20000;
 const B2_PLUS_LEVELS = new Set(["B2", "C1", "C2"]);
-const WORD_FETCH_TIMEOUT_MS = 18000;
-const WORD_MAX_OUTPUT_TOKENS = 1800;
-const WORD_RECOVERY_OUTPUT_TOKENS = 1200;
-const WORD_LOCAL_FALLBACK_MAX = 8;
+const WORD_FETCH_TIMEOUT_MS = 30000;
+const WORD_MAX_OUTPUT_TOKENS = 3200;
+const POS_VALUE_SET = new Set(["noun", "verb", "adj", "adv", "prep", "pron", "det", "conj", "other"]);
+const LOW_VALUE_WORD_SET = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "been",
+  "being",
+  "by",
+  "for",
+  "from",
+  "had",
+  "has",
+  "have",
+  "he",
+  "her",
+  "him",
+  "his",
+  "in",
+  "is",
+  "it",
+  "its",
+  "of",
+  "on",
+  "or",
+  "said",
+  "she",
+  "that",
+  "the",
+  "their",
+  "them",
+  "they",
+  "this",
+  "to",
+  "was",
+  "were",
+  "will",
+  "with",
+  "soldier",
+  "soldiers"
+]);
 const WORD_COVERAGE_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["a2_plus_words"],
   properties: {
     a2_plus_words: EASYREAD_JSON_SCHEMA.properties.a2_plus_words
+  }
+};
+const EXPLANATION_ONLY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["simple_explanation", "notes", "confidence"],
+  properties: {
+    simple_explanation: { type: "string", minLength: 1 },
+    notes: { type: "string" },
+    confidence: {
+      type: "number",
+      minimum: 0,
+      maximum: 1
+    }
   }
 };
 const EASY_WORD_REPLACEMENTS = {
@@ -169,101 +225,78 @@ async function handleExplainRequest(payload, _sender) {
 
   const cached = await getCachedResponse(cacheKey);
   if (cached) {
-    const safeCached = ensureNonEmptyExplanation(
-      cached,
-      selectedText,
-      "EasyRead filled a backup explanation because cached output was empty."
-    );
-    const cachedWords = Array.isArray(safeCached.a2_plus_words) ? safeCached.a2_plus_words : [];
-    const cachedHasWords = cachedWords.length > 0;
-    if (!cachedHasWords) {
-      const cachedCandidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
-      if (cachedCandidates.length > 0) {
-        return {
-          cached: true,
-          result: safeCached,
-          requestId,
-          wordsPending: true,
-          explanationMode
-        };
-      }
-    }
-    return {
-      cached: true,
-      result: safeCached,
-      requestId,
-      wordsPending: false,
-      explanationMode
-    };
-  }
-
-  try {
-    const explanationOnly = await analyzeExplanationOnlySelection({
-      selectedText,
-      clientId,
-      model: selectedModel,
-      explanationMode
-    });
-    const wordsPending = explanationOnly.candidateCount > 0;
-    const immediateResult = enforceEasyLanguage(
+    const safeCachedRaw = normalizeResultShape(cached);
+    const safeCached = enforceEasyLanguage(
       {
-        ...explanationOnly.parsed,
-        a2_plus_words: []
+        ...safeCachedRaw,
+        a2_plus_words: Array.isArray(safeCachedRaw.a2_plus_words) ? safeCachedRaw.a2_plus_words : []
       },
       selectedText
     );
-    const safeImmediateResult = ensureNonEmptyExplanation(
-      immediateResult,
-      selectedText,
-      "EasyRead filled a backup explanation because the model returned empty text."
-    );
-
-    if (!isOutputUsable(safeImmediateResult)) {
-      throw new EasyReadError("Model output is empty. Please try again.", "EMPTY_RESULT");
-    }
-
-    await saveCachedResponse(
-      cacheKey,
-      {
-        selectedText,
-        explanationMode,
-        model: selectedModel
-      },
-      safeImmediateResult
-    );
-
-    return {
-      cached: false,
-      result: safeImmediateResult,
-      requestId,
-      wordsPending,
-      explanationMode
-    };
-  } catch (error) {
-    if (isRecoverableModelOutputError(error)) {
-      const fallbackResult = buildLocalFallbackResult(
-        selectedText,
-        "EasyRead used fallback mode because the model response was incomplete."
-      );
-      await saveCachedResponse(
-        cacheKey,
-        {
-          selectedText,
-          explanationMode,
-          model: selectedModel
-        },
-        fallbackResult
-      );
+    if (!isOutputUsable(safeCached)) {
+      // Ignore invalid cached payload and fetch a fresh model result.
+    } else {
+      const cachedWords = Array.isArray(safeCached.a2_plus_words) ? safeCached.a2_plus_words : [];
+      const cachedHasWords = cachedWords.length > 0;
+      if (!cachedHasWords) {
+        const cachedCandidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
+        if (cachedCandidates.length > 0) {
+          return {
+            cached: true,
+            result: safeCached,
+            requestId,
+            wordsPending: true,
+            explanationMode
+          };
+        }
+      }
       return {
-        cached: false,
-        result: fallbackResult,
+        cached: true,
+        result: safeCached,
         requestId,
         wordsPending: false,
         explanationMode
       };
     }
-    throw error;
   }
+
+  const explanationOnly = await analyzeExplanationOnlySelection({
+    selectedText,
+    clientId,
+    model: selectedModel,
+    explanationMode
+  });
+  const wordsPending = explanationOnly.candidateCount > 0;
+  const immediateResult = enforceEasyLanguage(
+    {
+      ...explanationOnly.parsed,
+      a2_plus_words: []
+    },
+    selectedText
+  );
+  const safeImmediateResult = normalizeResultShape(immediateResult);
+
+  if (!isOutputUsable(safeImmediateResult)) {
+    throw new EasyReadError("Model did not return a usable explanation. Please try again.", "EMPTY_RESULT");
+  }
+
+  await saveCachedResponse(
+    cacheKey,
+    {
+      selectedText,
+      explanationMode,
+      model: selectedModel
+    },
+    safeImmediateResult
+  );
+
+  return {
+    cached: false,
+    result: safeImmediateResult,
+    requestId,
+    wordsPending,
+    explanationMode
+  };
 }
 
 async function handleFetchWordsRequest(payload, _sender) {
@@ -295,10 +328,13 @@ async function handleFetchWordsRequest(payload, _sender) {
 
   const cached = await getCachedResponse(cacheKey);
   if (cached) {
-    const safeCached = ensureNonEmptyExplanation(
-      cached,
-      selectedText,
-      "EasyRead filled a backup explanation because cached output was empty."
+    const safeCachedRaw = normalizeResultShape(cached);
+    const safeCached = enforceEasyLanguage(
+      {
+        ...safeCachedRaw,
+        a2_plus_words: Array.isArray(safeCachedRaw.a2_plus_words) ? safeCachedRaw.a2_plus_words : []
+      },
+      selectedText
     );
     if (Array.isArray(safeCached.a2_plus_words) && safeCached.a2_plus_words.length > 0) {
       return {
@@ -316,7 +352,10 @@ async function handleFetchWordsRequest(payload, _sender) {
       ? payload.baseResult
       : cached && typeof cached === "object"
         ? cached
-        : buildLocalFallbackResult(selectedText, "EasyRead used fallback mode because base explanation was missing.");
+        : null;
+  if (!baseResult || !hasText(baseResult.simple_explanation)) {
+    throw new EasyReadError("Base explanation is missing. Please click Explain again.", "MISSING_BASE_RESULT");
+  }
 
   const candidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
   if (candidates.length === 0) {
@@ -328,11 +367,7 @@ async function handleFetchWordsRequest(payload, _sender) {
       },
       selectedText
     );
-    const safeNoWords = ensureNonEmptyExplanation(
-      noWordsResult,
-      selectedText,
-      "EasyRead filled a backup explanation because the model returned empty text."
-    );
+    const safeNoWords = normalizeResultShape(noWordsResult);
     await saveCachedResponse(
       cacheKey,
       {
@@ -368,7 +403,7 @@ async function handleFetchWordsRequest(payload, _sender) {
     words = [];
   }
 
-  let finalWordItems = normalizeAndCompleteWordEntries(words, candidates, wordLimit);
+  let finalWordItems = normalizeAndCompleteWordEntries(words, wordLimit);
   let finalNotes = baseResult.notes || "";
   if (finalWordItems.length === 0) {
     finalNotes = appendNote(finalNotes, "EasyRead could not find clear words above B1 in this text.");
@@ -382,11 +417,7 @@ async function handleFetchWordsRequest(payload, _sender) {
     },
     selectedText
   );
-  const safeFinalResult = ensureNonEmptyExplanation(
-    finalResult,
-    selectedText,
-    "EasyRead filled a backup explanation because the model returned empty text."
-  );
+  const safeFinalResult = normalizeResultShape(finalResult);
   await saveCachedResponse(
     cacheKey,
     {
@@ -434,39 +465,21 @@ function appendNote(base, addition) {
   return prior ? `${prior} ${next}` : next;
 }
 
-function isRecoverableModelOutputError(error) {
-  const message = String(error?.message || "").toLowerCase();
-  const code = String(error?.code || "");
-  if (code === "EMPTY_OUTPUT" || code === "BAD_JSON") {
-    return true;
-  }
-  if (message.includes("model returned no text")) {
-    return true;
-  }
-  if (message.includes("max_output_tokens")) {
-    return true;
-  }
-  return false;
-}
-
-function ensureNonEmptyExplanation(result, selectedText, fallbackNote = "") {
+function normalizeResultShape(result) {
   const base = result && typeof result === "object" ? { ...result } : {};
-  if (hasText(base.simple_explanation)) {
-    return base;
-  }
-
-  base.simple_explanation = buildLocalFallbackExplanation(selectedText);
-  base.notes = appendNote(
-    base.notes,
-    fallbackNote || "EasyRead used backup explanation because model output was empty."
-  );
-  if (typeof base.confidence !== "number" || !Number.isFinite(base.confidence)) {
-    base.confidence = 0.35;
-  } else {
-    base.confidence = Math.min(base.confidence, 0.35);
-  }
   if (!Array.isArray(base.a2_plus_words)) {
     base.a2_plus_words = [];
+  }
+  if (typeof base.simple_explanation !== "string") {
+    base.simple_explanation = "";
+  } else {
+    base.simple_explanation = base.simple_explanation.trim();
+  }
+  if (typeof base.notes !== "string") {
+    base.notes = "";
+  }
+  if (typeof base.confidence !== "number" || !Number.isFinite(base.confidence)) {
+    base.confidence = 0.5;
   }
   return base;
 }
@@ -518,21 +531,17 @@ async function analyzeExplanationOnlySelection({
     model,
     systemPrompt: CORE_SYSTEM_PROMPT,
     userPrompt,
-    useSchema: false,
+    schema: EXPLANATION_ONLY_SCHEMA,
+    schemaName: "easyread_explanation_only",
+    useSchema: true,
     maxOutputTokens: tokenBudget,
-    maxAttempts: 1
-  }).catch(() => null);
+    maxAttempts: 1,
+    allowSchemaFallback: false
+  });
 
   const rawText = extractOutputText(response);
   if (!rawText) {
-    return {
-      parsed: buildLocalFallbackResult(
-        selectedText,
-        "EasyRead used fallback mode because the model response was empty."
-      ),
-      candidateCount: candidates.length,
-      candidates
-    };
+    throw new EasyReadError("Model returned no explanation text. Please try again.", "EMPTY_OUTPUT");
   }
 
   let parsed;
@@ -540,7 +549,7 @@ async function analyzeExplanationOnlySelection({
     parsed = parseAndNormalizeResponse(rawText);
   } catch (_error) {
     parsed = {
-      simple_explanation: normalizeModelExplanationText(rawText),
+      simple_explanation: extractExplanationFromRawText(rawText),
       a2_plus_words: [],
       notes: "",
       confidence: 0.74
@@ -548,21 +557,19 @@ async function analyzeExplanationOnlySelection({
   }
 
   if (!hasText(parsed.simple_explanation)) {
-    parsed.simple_explanation = normalizeModelExplanationText(rawText);
+    parsed.simple_explanation = extractExplanationFromRawText(rawText);
     parsed.confidence = Math.max(0.65, Number(parsed.confidence) || 0.65);
   }
 
   if (!hasText(parsed.simple_explanation)) {
-    parsed = buildLocalFallbackResult(
-      selectedText,
-      "EasyRead used fallback mode because the model returned empty explanation text."
-    );
+    throw new EasyReadError("Model returned empty explanation. Please try again.", "EMPTY_OUTPUT");
   }
 
   if (isExplanationTooCloseToSource(parsed.simple_explanation, selectedText)) {
-    parsed.simple_explanation = buildLocalFallbackExplanation(selectedText);
-    parsed.notes = appendNote(parsed.notes || "", "EasyRead rewrote the text locally to keep it simple.");
-    parsed.confidence = Math.min(0.7, Number(parsed.confidence) || 0.7);
+    throw new EasyReadError(
+      "Model explanation was too close to the original text. Please select a shorter part and try again.",
+      "COPY_OUTPUT"
+    );
   }
 
   parsed = enforceEasyLanguage(
@@ -672,20 +679,20 @@ function getExplanationOnlyTokenBudget(selectionLength, explanationMode = DEFAUL
   let budget;
 
   if (selectionLength <= 320) {
-    budget = 900;
+    budget = 2200;
   } else if (selectionLength <= 1200) {
-    budget = 1200;
+    budget = 3200;
   } else {
-    budget = 1600;
+    budget = 4200;
   }
 
   if (mode === "simple") {
-    budget -= 120;
+    budget -= 200;
   } else if (mode === "detailed") {
-    budget += 180;
+    budget += 300;
   }
 
-  return Math.max(700, budget);
+  return Math.max(1600, budget);
 }
 
 function normalizeWordKey(word) {
@@ -711,12 +718,8 @@ function keepB2PlusWords(entries) {
   return (entries || []).filter(isB2PlusWordEntry);
 }
 
-function normalizeAndCompleteWordEntries(entries, candidates = [], wordLimit = 12) {
-  const normalized = normalizeWordEntriesWithFallback(entries, wordLimit);
-  if (normalized.length > 0) {
-    return normalized;
-  }
-  return buildLocalWordFallbackEntries(candidates, wordLimit);
+function normalizeAndCompleteWordEntries(entries, wordLimit = 12) {
+  return normalizeWordEntriesWithFallback(entries, wordLimit);
 }
 
 function normalizeWordEntriesWithFallback(entries, wordLimit = 12) {
@@ -736,14 +739,13 @@ function normalizeWordEntriesWithFallback(entries, wordLimit = 12) {
     seen.add(key);
 
     const lemma = normalizeLemma(item?.lemma || word);
+    if (isExcludedWordToken(word, lemma)) {
+      continue;
+    }
     const pos = normalizePosValue(item?.pos, word);
     const cefr = normalizeCefrB2Plus(item?.cefr);
-    const definition = hasText(item?.definition_simple)
-      ? String(item.definition_simple).trim()
-      : buildLocalDefinition(word, lemma);
-    const example = hasText(item?.example_simple)
-      ? String(item.example_simple).trim()
-      : buildLocalExample(word, definition);
+    const definition = hasText(item?.definition_simple) ? String(item.definition_simple).trim() : "";
+    const example = hasText(item?.example_simple) ? String(item.example_simple).trim() : "";
 
     result.push({
       word,
@@ -762,45 +764,19 @@ function normalizeWordEntriesWithFallback(entries, wordLimit = 12) {
   return keepB2PlusWords(result);
 }
 
-function buildLocalWordFallbackEntries(candidates, wordLimit = 12) {
-  const safeLimit = Math.max(1, Math.min(Number(wordLimit) || WORD_LOCAL_FALLBACK_MAX, WORD_LOCAL_FALLBACK_MAX));
-  const seen = new Set();
-  const result = [];
-
-  for (const raw of Array.isArray(candidates) ? candidates : []) {
-    const word = String(raw || "").trim();
-    if (!word) {
-      continue;
-    }
-    const key = normalizeWordKey(word);
-    if (!key || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-
-    const lemma = normalizeLemma(word);
-    const definition = buildLocalDefinition(word, lemma);
-    result.push({
-      word,
-      lemma,
-      pos: normalizePosValue("", word),
-      cefr: "B2",
-      definition_simple: definition,
-      example_simple: buildLocalExample(word, definition)
-    });
-
-    if (result.length >= safeLimit) {
-      break;
-    }
-  }
-
-  return keepB2PlusWords(result);
-}
-
 function normalizeLemma(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text) {
     return "";
+  }
+  if (text === "has" || text === "had" || text === "having") {
+    return "have";
+  }
+  if (text === "is" || text === "am" || text === "are" || text === "was" || text === "were" || text === "been") {
+    return "be";
+  }
+  if (text === "does" || text === "did" || text === "done") {
+    return "do";
   }
   if (text.endsWith("ies") && text.length > 4) {
     return `${text.slice(0, -3)}y`;
@@ -822,8 +798,7 @@ function normalizeLemma(value) {
 
 function normalizePosValue(pos, word) {
   const normalized = String(pos || "").trim().toLowerCase();
-  const allowed = new Set(["noun", "verb", "adj", "adv", "prep", "pron", "det", "conj", "other"]);
-  if (allowed.has(normalized)) {
+  if (POS_VALUE_SET.has(normalized)) {
     return normalized;
   }
   const value = normalizeWordKey(word);
@@ -853,21 +828,27 @@ function normalizeCefrB2Plus(value) {
   return "B2";
 }
 
-function buildLocalDefinition(word, lemma) {
-  const key = normalizeWordKey(word);
-  const base = EASY_WORD_REPLACEMENTS[key] || EASY_WORD_REPLACEMENTS[lemma] || "";
-  if (base) {
-    return `In this text, this word means ${base}.`;
-  }
-  return "In this text, this word has a special meaning.";
+function isLikelyProperNameWord(word) {
+  const raw = String(word || "").trim();
+  return /^[A-Z][a-z]{2,}$/.test(raw);
 }
 
-function buildLocalExample(word, definition) {
-  const core = String(definition || "").replace(/^In this text,\s*/i, "").trim();
-  if (core) {
-    return `In this text, "${word}" means ${core.toLowerCase()}`;
+function isExcludedWordToken(word, lemma = "") {
+  const key = normalizeWordKey(word);
+  const lemmaKey = normalizeWordKey(lemma);
+  if (!key || key.length <= 2) {
+    return true;
   }
-  return `In this text, "${word}" has a special meaning.`;
+  if (LOW_VALUE_WORD_SET.has(key) || LOW_VALUE_WORD_SET.has(lemmaKey)) {
+    return true;
+  }
+  if (A1_A2_WORD_SET.has(key) || A1_A2_WORD_SET.has(lemmaKey)) {
+    return true;
+  }
+  if (isLikelyProperNameWord(word)) {
+    return true;
+  }
+  return false;
 }
 
 async function callModelForB2PlusWords({
@@ -903,6 +884,7 @@ Rules:
 8) example_simple must be a fresh sentence (not a template) with at least 6 words.
 9) Do not output generic lines like "This is a hard word in this text."
 10) Do not include person names, place names, or organization names unless the word is a true difficult vocabulary item.
+11) Do not start definition_simple or example_simple with "In this text".
 `;
   const response = await requestResponsesApi({
     clientId,
@@ -913,8 +895,8 @@ Rules:
     schemaName: "easyread_word_coverage",
     useSchema: true,
     maxOutputTokens: WORD_MAX_OUTPUT_TOKENS,
-    maxAttempts: 2,
-    allowSchemaFallback: true
+    maxAttempts: 1,
+    allowSchemaFallback: false
   }).catch(() => null);
 
   const rawText = extractOutputText(response);
@@ -928,43 +910,7 @@ Rules:
       // continue to recovery pass
     }
   }
-
-  const recoveryPrompt = `
-Return JSON only with key "a2_plus_words".
-If you are unsure, return fewer items, but ensure each item is complete.
-
-Selected text:
-"""${selectedText}"""
-
-Candidate hints:
-${JSON.stringify(candidateHints || [])}
-
-Rules:
-1) Return at most ${Math.max(4, Math.min(wordLimit, 8))} items.
-2) Include only words above B1 (B2/C1/C2).
-3) Each item must include: word, lemma, pos, cefr, definition_simple, example_simple.
-4) definition_simple and example_simple must be non-empty.
-5) Do not include names unless they are true difficult vocabulary.
-`;
-  const recoveryResponse = await requestResponsesApi({
-    clientId,
-    model,
-    systemPrompt,
-    userPrompt: recoveryPrompt,
-    useSchema: false,
-    maxOutputTokens: WORD_RECOVERY_OUTPUT_TOKENS,
-    maxAttempts: 1
-  }).catch(() => null);
-  const recoveryText = extractOutputText(recoveryResponse);
-  if (!recoveryText) {
-    return [];
-  }
-
-  try {
-    return parseAndNormalizeWordCoverage(recoveryText);
-  } catch (_error) {
-    return [];
-  }
+  return [];
 }
 
 async function requestResponsesApi({
@@ -1091,13 +1037,50 @@ function enforceEasyLanguage(result, selectedText) {
 
   normalized.a2_plus_words = normalized.a2_plus_words.map((item) => ({
     ...item,
-    definition_simple:
-      simplifyToEasyText(item?.definition_simple || "", "") || "This word is not easy.",
-    example_simple:
-      simplifyToEasyText(item?.example_simple || "", "") || "I see this word here."
+    definition_simple: normalizeMeaningForDisplay(item?.definition_simple || "", item?.word || "", item?.lemma || ""),
+    example_simple: normalizeExampleForDisplay(
+      item?.example_simple || "",
+      item?.word || "",
+      item?.lemma || "",
+      item?.definition_simple || ""
+    )
   }));
 
   return normalized;
+}
+
+function normalizeMeaningForDisplay(rawText, word, lemma) {
+  let cleaned = simplifyToEasyText(rawText, "");
+  cleaned = cleaned
+    .replace(/^in this text[:,]?\s*/i, "")
+    .replace(/^this word means\s+/i, "")
+    .replace(/^the word means\s+/i, "")
+    .replace(/^this word has a special meaning\.?$/i, "")
+    .replace(/^this word has a hard meaning\.?$/i, "")
+    .trim();
+
+  cleaned = String(cleaned).replace(/^in this text[:,]?\s*/i, "").trim();
+  if (cleaned && !/[.!?]$/.test(cleaned)) {
+    cleaned = `${cleaned}.`;
+  }
+  return cleaned;
+}
+
+function normalizeExampleForDisplay(rawText, word, lemma, definitionText = "") {
+  let cleaned = simplifyToEasyText(rawText, "");
+  cleaned = cleaned
+    .replace(/^in this text[:,]?\s*/i, "")
+    .replace(/^example:\s*/i, "")
+    .trim();
+
+  if (!cleaned || /^(this word|the word)\s+/i.test(cleaned)) {
+    return "";
+  }
+  cleaned = String(cleaned).replace(/^in this text[:,]?\s*/i, "").trim();
+  if (cleaned && !/[.!?]$/.test(cleaned)) {
+    cleaned = `${cleaned}.`;
+  }
+  return cleaned;
 }
 
 function normalizeDisplayConfidence(rawValue, notes, explanation) {
@@ -1133,13 +1116,22 @@ function simplifyToEasyText(text, selectedText) {
     return "";
   }
 
-  let simplified = applyEasyWordReplacements(raw);
+  let source = raw;
+  if ((/^\s*\{/.test(raw) || raw.includes('"simple_explanation"')) && !selectedText) {
+    const extracted = extractExplanationFromRawText(raw);
+    if (hasText(extracted)) {
+      source = extracted;
+    }
+  }
+
+  let simplified = applyEasyWordReplacements(source);
   simplified = simplified.replace(/\s+/g, " ").trim();
 
   if (!simplified) {
-    if (selectedText) {
-      return buildLocalFallbackExplanation(selectedText);
-    }
+    return "";
+  }
+
+  if (selectedText && isExplanationTooCloseToSource(simplified, selectedText)) {
     return "";
   }
 
@@ -1198,35 +1190,6 @@ function escapeRegExp(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function buildLocalFallbackResult(selectedText, fallbackNote = "") {
-  const note = simplifyNoteText(String(fallbackNote || "").trim());
-  return {
-    simple_explanation: buildLocalFallbackExplanation(selectedText),
-    a2_plus_words: [],
-    notes: note,
-    confidence: 0.2
-  };
-}
-
-function buildLocalFallbackExplanation(selectedText) {
-  const normalized = String(selectedText || "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!normalized) {
-    return "EasyRead could not read this text.";
-  }
-
-  let simplified = applyEasyWordReplacements(normalized).replace(/\s+/g, " ").trim();
-  if (!simplified) {
-    return "This text talks about people, actions, and ideas.";
-  }
-  if (simplified.length > 1200) {
-    simplified = `${simplified.slice(0, 1200).trim()}...`;
-  }
-  return simplified;
-}
-
 function normalizeModelExplanationText(rawText) {
   const raw = String(rawText || "").trim();
   if (!raw) {
@@ -1245,6 +1208,76 @@ function normalizeModelExplanationText(rawText) {
     cleaned = `${cleaned.slice(0, 1500).trim()}...`;
   }
   return cleaned;
+}
+
+function extractExplanationFromRawText(rawText) {
+  const cleaned = normalizeModelExplanationText(rawText);
+  if (!cleaned) {
+    return "";
+  }
+
+  // If the model returned JSON text (or truncated JSON), extract the field value.
+  if (/^\s*\{/.test(cleaned) || cleaned.includes('"simple_explanation"')) {
+    const extracted = extractSimpleExplanationField(cleaned);
+    if (hasText(extracted)) {
+      return extracted;
+    }
+  }
+
+  return cleaned;
+}
+
+function extractSimpleExplanationField(raw) {
+  const text = String(raw || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  // Complete JSON string value.
+  const fullMatch = text.match(/"simple_explanation"\s*:\s*"((?:\\.|[^"\\])*)"/s);
+  if (fullMatch?.[1]) {
+    const decoded = decodeJsonStringLike(fullMatch[1]);
+    if (hasText(decoded)) {
+      return decoded;
+    }
+  }
+
+  // Truncated JSON value without a closing quote.
+  const partialMatch = text.match(/"simple_explanation"\s*:\s*"([\s\S]*)$/);
+  if (partialMatch?.[1]) {
+    const fragment = partialMatch[1]
+      .replace(/"\s*,\s*"(notes|confidence|a2_plus_words)"[\s\S]*$/i, "")
+      .replace(/[}\]]+\s*$/g, "")
+      .trim();
+    const decoded = decodeJsonStringLike(fragment);
+    if (hasText(decoded)) {
+      return decoded;
+    }
+  }
+
+  return "";
+}
+
+function decodeJsonStringLike(value) {
+  const raw = String(value || "");
+  if (!raw) {
+    return "";
+  }
+
+  // Try JSON decode first.
+  try {
+    return JSON.parse(`"${raw}"`).trim();
+  } catch (_error) {
+    // Best-effort unescape for truncated/invalid JSON fragments.
+    return raw
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, " ")
+      .replace(/\\t/g, " ")
+      .replace(/\\r/g, " ")
+      .replace(/\\\\/g, "\\")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
 }
 
 function isExplanationTooCloseToSource(explanation, selectedText) {
