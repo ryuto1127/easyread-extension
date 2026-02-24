@@ -15,7 +15,9 @@
     lastSelectionText: "",
     currentRequestId: "",
     wordsFetchRequestId: "",
-    explanationMode: "balanced"
+    explanationMode: "balanced",
+    streamedExplanation: "",
+    isExplainInFlight: false
   };
 
   const root = document.createElement("div");
@@ -128,6 +130,11 @@
 
       if (message?.type === "easyread-words-update") {
         handleWordsUpdate(message);
+        return;
+      }
+
+      if (message?.type === "easyread-explanation-stream") {
+        handleExplanationStream(message);
       }
     });
   }
@@ -215,11 +222,13 @@
     }
 
     state.lastSelectionText = selectedText;
+    state.streamedExplanation = "";
     const existingWords = Array.isArray(state.lastResult?.a2_plus_words)
       ? state.lastResult.a2_plus_words
       : [];
     const requestId = createRequestId();
     state.currentRequestId = requestId;
+    state.isExplainInFlight = true;
     showOverlay();
     if (selectedText.length > CHUNK_THRESHOLD_CHARS) {
       showStatus("Large text detected. Creating explanation first...");
@@ -258,6 +267,7 @@
       }
 
       state.lastResult = nextResult;
+      state.streamedExplanation = "";
       const shouldFetchWords = !isRefine && Boolean(response.data?.wordsPending);
       renderResult(state.lastResult, response.data?.cached, {
         wordsPending: shouldFetchWords,
@@ -273,6 +283,7 @@
     } catch (error) {
       renderError(error.message || "Failed to explain the selection.");
     } finally {
+      state.isExplainInFlight = false;
       setLoading(false);
     }
   }
@@ -384,6 +395,30 @@
     renderExplanation(result);
     renderWords(result, false);
     showStatus(`Explanation ready • ${getModeLabel(state.explanationMode)} • words updated`);
+  }
+
+  function handleExplanationStream(message) {
+    const incomingRequestId = typeof message?.requestId === "string" ? message.requestId.trim() : "";
+    if (!incomingRequestId || incomingRequestId !== state.currentRequestId) {
+      return;
+    }
+    if (!state.isExplainInFlight) {
+      return;
+    }
+
+    const delta = typeof message?.delta === "string" ? message.delta : "";
+    if (delta) {
+      state.streamedExplanation += delta;
+      const partial = state.streamedExplanation.trim();
+      if (partial) {
+        explanationPanel.textContent = partial;
+        const hasWords = getRenderableWords(state.lastResult?.a2_plus_words).length > 0;
+        if (!hasWords) {
+          wordsPanel.textContent = "Loading difficult words...";
+        }
+        showStatus(`Streaming • ${getModeLabel(state.explanationMode)}...`);
+      }
+    }
   }
 
   function renderError(message) {

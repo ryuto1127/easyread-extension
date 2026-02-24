@@ -1,7 +1,6 @@
 import { A1_A2_WORD_SET } from "./data/a1a2Words.js";
 import { EASYREAD_JSON_SCHEMA, MODEL_VERSION } from "./lib/constants.js";
 import {
-  parseAndNormalizeResponse,
   parseAndNormalizeWordCoverage,
   extractOutputText,
   isOutputUsable
@@ -18,6 +17,7 @@ import {
 
 const PROXY_BASE_URL = "https://easyread-extension.onrender.com";
 const PROXY_EXPLAIN_PATH = "/api/explain";
+const PROXY_EXPLAIN_STREAM_PATH = "/api/explain-stream";
 const CONTEXT_MENU_ID = "easyread_explain";
 const EXPLAIN_MODEL = "gpt-5-mini";
 const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
@@ -80,20 +80,6 @@ const WORD_COVERAGE_SCHEMA = {
     a2_plus_words: EASYREAD_JSON_SCHEMA.properties.a2_plus_words
   }
 };
-const EXPLANATION_ONLY_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["simple_explanation", "notes", "confidence"],
-  properties: {
-    simple_explanation: { type: "string", minLength: 1 },
-    notes: { type: "string" },
-    confidence: {
-      type: "number",
-      minimum: 0,
-      maximum: 1
-    }
-  }
-};
 const EASY_WORD_REPLACEMENTS = {
   "small details": "small things",
   "daily life": "everyday life",
@@ -117,14 +103,12 @@ const EASY_WORD_REPLACEMENTS = {
   incomplete: "not done"
 };
 
-const CORE_SYSTEM_PROMPT = `
+const EXPLANATION_SYSTEM_PROMPT = `
 You are EasyRead, a reading helper for English learners.
-Always output valid JSON only.
 Write clear and natural English that is easy to understand.
 Give enough detail so the learner can understand difficult text without opening another tab.
 Stay faithful to the selected text and do not invent details.
-Identify words at C1 or C2 level in the selected text and return short clear meanings and examples.
-If the input is unclear or too long, explain that in notes and lower confidence.
+Return plain text only for the explanation.
 `;
 
 class EasyReadError extends Error {
@@ -196,7 +180,7 @@ async function createContextMenu() {
   });
 }
 
-async function handleExplainRequest(payload, _sender) {
+async function handleExplainRequest(payload, sender) {
   const settings = await getSettings();
   const selectedText = normalizeSelection(payload.selectedText);
   const requestId = normalizeRequestId(payload.requestId);
@@ -264,7 +248,9 @@ async function handleExplainRequest(payload, _sender) {
     selectedText,
     clientId,
     model: selectedModel,
-    explanationMode
+    explanationMode,
+    requestId,
+    streamTabId: typeof sender?.tab?.id === "number" ? sender.tab.id : null
   });
   const wordsPending = explanationOnly.candidateCount > 0;
   const immediateResult = enforceEasyLanguage(
@@ -520,41 +506,32 @@ async function analyzeExplanationOnlySelection({
   selectedText,
   clientId,
   model,
-  explanationMode = DEFAULT_EXPLANATION_MODE
+  explanationMode = DEFAULT_EXPLANATION_MODE,
+  requestId = "",
+  streamTabId = null
 }) {
   const candidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
   const userPrompt = buildExplanationOnlyPrompt(selectedText, explanationMode);
   const tokenBudget = getExplanationOnlyTokenBudget(selectedText.length, explanationMode);
 
-  const response = await requestResponsesApi({
+  const rawText = await requestExplanationText({
     clientId,
     model,
-    systemPrompt: CORE_SYSTEM_PROMPT,
     userPrompt,
-    schema: EXPLANATION_ONLY_SCHEMA,
-    schemaName: "easyread_explanation_only",
-    useSchema: true,
     maxOutputTokens: tokenBudget,
-    maxAttempts: 1,
-    allowSchemaFallback: false
+    requestId,
+    streamTabId
   });
-
-  const rawText = extractOutputText(response);
   if (!rawText) {
     throw new EasyReadError("Model returned no explanation text. Please try again.", "EMPTY_OUTPUT");
   }
 
-  let parsed;
-  try {
-    parsed = parseAndNormalizeResponse(rawText);
-  } catch (_error) {
-    parsed = {
-      simple_explanation: extractExplanationFromRawText(rawText),
-      a2_plus_words: [],
-      notes: "",
-      confidence: 0.74
-    };
-  }
+  let parsed = {
+    simple_explanation: extractExplanationFromRawText(rawText),
+    a2_plus_words: [],
+    notes: "",
+    confidence: 0.78
+  };
 
   if (!hasText(parsed.simple_explanation)) {
     parsed.simple_explanation = extractExplanationFromRawText(rawText);
@@ -591,8 +568,8 @@ function buildExplanationOnlyPrompt(selectedText, explanationMode) {
   const explanationGuidance = getExplanationLengthGuidance(selectedText.length, mode);
   const styleGuidance = getExplanationStyleGuidance(mode);
   return `
-Return JSON only that follows the schema.
 Write a useful explanation for learners.
+Return explanation text only (no JSON, no markdown, no bullets, no labels).
 Requested explanation mode: ${mode}.
 ${styleGuidance}
 ${explanationGuidance}
@@ -601,13 +578,11 @@ Selected text:
 """${selectedText}"""
 
 Rules:
-1) Put the full explanation in simple_explanation.
+1) Output only the explanation body text.
 2) Keep the explanation strictly grounded in the selected text; do not add outside facts.
 3) Follow the same idea order as the selected text.
 4) Do not include word-list entries in this step.
-5) Keep notes short, only when needed.
-6) Do not copy full sentences from the selected text. Paraphrase in easier words.
-7) Do not mention system/model issues in notes.
+5) Do not copy full sentences from the selected text. Paraphrase in easier words.
 `;
 }
 
@@ -913,6 +888,245 @@ Rules:
   return [];
 }
 
+async function requestExplanationText({
+  clientId,
+  model,
+  userPrompt,
+  maxOutputTokens,
+  requestId,
+  streamTabId
+}) {
+  const streamEnabled = typeof streamTabId === "number" && typeof requestId === "string" && requestId.trim().length > 0;
+  if (streamEnabled) {
+    try {
+      return await requestResponsesApiStream({
+        clientId,
+        model,
+        systemPrompt: EXPLANATION_SYSTEM_PROMPT,
+        userPrompt,
+        maxOutputTokens,
+        requestId: requestId.trim(),
+        streamTabId
+      });
+    } catch (_streamError) {
+      // Fallback to non-streaming response path if stream transport fails.
+    }
+  }
+
+  const response = await requestResponsesApi({
+    clientId,
+    model,
+    systemPrompt: EXPLANATION_SYSTEM_PROMPT,
+    userPrompt,
+    useSchema: false,
+    maxOutputTokens,
+    maxAttempts: 1,
+    allowSchemaFallback: false
+  });
+  return extractOutputText(response);
+}
+
+async function requestResponsesApiStream({
+  clientId,
+  model,
+  systemPrompt,
+  userPrompt,
+  maxOutputTokens = MAX_OUTPUT_TOKENS,
+  maxAttempts = 1,
+  requestId,
+  streamTabId
+}) {
+  const payload = buildResponsesPayload({
+    model,
+    systemPrompt,
+    userPrompt,
+    maxOutputTokens,
+    useSchema: false
+  });
+  payload.stream = true;
+
+  return withExponentialBackoff(async () => {
+    const response = await postProxyStream({
+      clientId,
+      path: PROXY_EXPLAIN_STREAM_PATH,
+      body: {
+        payload
+      }
+    });
+    return readExplanationStream({
+      response,
+      requestId,
+      streamTabId
+    });
+  }, Math.max(1, Number(maxAttempts) || 1));
+}
+
+async function readExplanationStream({ response, requestId, streamTabId }) {
+  if (!response?.body) {
+    throw new EasyReadError("Streaming response body was empty.", "EMPTY_STREAM");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let fullText = "";
+  let finalResponseObject = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    const parsed = splitSseEvents(buffer);
+    buffer = parsed.remainder;
+
+    for (const eventBlock of parsed.events) {
+      const data = parseSseData(eventBlock);
+      if (!data) {
+        continue;
+      }
+      if (data === "[DONE]") {
+        continue;
+      }
+
+      let eventJson;
+      try {
+        eventJson = JSON.parse(data);
+      } catch (_parseError) {
+        continue;
+      }
+
+      const delta = extractStreamDeltaText(eventJson);
+      if (delta) {
+        fullText += delta;
+        sendExplanationStreamEvent(streamTabId, {
+          requestId,
+          delta
+        });
+      }
+
+      const completed = extractCompletedResponse(eventJson);
+      if (completed) {
+        finalResponseObject = completed;
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    const data = parseSseData(buffer.trim());
+    if (data && data !== "[DONE]") {
+      try {
+        const eventJson = JSON.parse(data);
+        const delta = extractStreamDeltaText(eventJson);
+        if (delta) {
+          fullText += delta;
+          sendExplanationStreamEvent(streamTabId, {
+            requestId,
+            delta
+          });
+        }
+        const completed = extractCompletedResponse(eventJson);
+        if (completed) {
+          finalResponseObject = completed;
+        }
+      } catch (_parseError) {
+        // Ignore trailing partial event.
+      }
+    }
+  }
+
+  if (!fullText && finalResponseObject) {
+    fullText = extractOutputText(finalResponseObject) || "";
+  }
+
+  sendExplanationStreamEvent(streamTabId, {
+    requestId,
+    done: true
+  });
+
+  if (!fullText.trim()) {
+    throw new EasyReadError("Model returned no explanation text. Please try again.", "EMPTY_OUTPUT");
+  }
+
+  return fullText.trim();
+}
+
+function splitSseEvents(buffer) {
+  const events = [];
+  let working = String(buffer || "");
+  let markerIndex = working.indexOf("\n\n");
+  while (markerIndex >= 0) {
+    events.push(working.slice(0, markerIndex));
+    working = working.slice(markerIndex + 2);
+    markerIndex = working.indexOf("\n\n");
+  }
+  return {
+    events,
+    remainder: working
+  };
+}
+
+function parseSseData(eventBlock) {
+  const lines = String(eventBlock || "").split("\n");
+  const dataLines = [];
+  for (const line of lines) {
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+  return dataLines.join("\n").trim();
+}
+
+function extractStreamDeltaText(eventJson) {
+  if (!eventJson || typeof eventJson !== "object") {
+    return "";
+  }
+
+  if (typeof eventJson.delta === "string") {
+    return eventJson.delta;
+  }
+  if (typeof eventJson.text === "string" && /delta/i.test(String(eventJson.type || ""))) {
+    return eventJson.text;
+  }
+  if (typeof eventJson?.output_text?.delta === "string") {
+    return eventJson.output_text.delta;
+  }
+
+  return "";
+}
+
+function extractCompletedResponse(eventJson) {
+  if (!eventJson || typeof eventJson !== "object") {
+    return null;
+  }
+
+  if (eventJson.response && typeof eventJson.response === "object") {
+    const type = String(eventJson.type || "");
+    if (type.includes("completed") || type.includes("done")) {
+      return eventJson.response;
+    }
+  }
+
+  return null;
+}
+
+function sendExplanationStreamEvent(tabId, payload) {
+  if (typeof tabId !== "number") {
+    return;
+  }
+  chrome.tabs.sendMessage(
+    tabId,
+    {
+      type: "easyread-explanation-stream",
+      ...payload
+    },
+    () => {
+      void chrome.runtime.lastError;
+    }
+  );
+}
+
 async function requestResponsesApi({
   clientId,
   model,
@@ -924,6 +1138,44 @@ async function requestResponsesApi({
   maxOutputTokens = MAX_OUTPUT_TOKENS,
   maxAttempts = 1,
   allowSchemaFallback = true
+}) {
+  const payload = buildResponsesPayload({
+    model,
+    systemPrompt,
+    userPrompt,
+    maxOutputTokens,
+    schema,
+    schemaName,
+    useSchema
+  });
+
+  try {
+    return await postResponsesPayload({ clientId, payload, maxAttempts });
+  } catch (error) {
+    const schemaIssue =
+      allowSchemaFallback &&
+      useSchema &&
+      error instanceof EasyReadError &&
+      error.code === "PROXY_ERROR" &&
+      /text\.format|json_schema|schema|strict/i.test(error.message);
+    if (!schemaIssue) {
+      throw error;
+    }
+
+    const fallbackPayload = { ...payload };
+    delete fallbackPayload.text;
+    return postResponsesPayload({ clientId, payload: fallbackPayload, maxAttempts });
+  }
+}
+
+function buildResponsesPayload({
+  model,
+  systemPrompt,
+  userPrompt,
+  maxOutputTokens,
+  schema = EASYREAD_JSON_SCHEMA,
+  schemaName = "easyread_output",
+  useSchema = true
 }) {
   const payload = {
     model,
@@ -952,23 +1204,7 @@ async function requestResponsesApi({
     };
   }
 
-  try {
-    return await postResponsesPayload({ clientId, payload, maxAttempts });
-  } catch (error) {
-    const schemaIssue =
-      allowSchemaFallback &&
-      useSchema &&
-      error instanceof EasyReadError &&
-      error.code === "PROXY_ERROR" &&
-      /text\.format|json_schema|schema|strict/i.test(error.message);
-    if (!schemaIssue) {
-      throw error;
-    }
-
-    const fallbackPayload = { ...payload };
-    delete fallbackPayload.text;
-    return postResponsesPayload({ clientId, payload: fallbackPayload, maxAttempts });
-  }
+  return payload;
 }
 
 async function postResponsesPayload({ clientId, payload, maxAttempts = 1 }) {
@@ -1391,6 +1627,41 @@ async function postProxyJson({ clientId, path, body }) {
   }
 
   return response.json();
+}
+
+async function postProxyStream({ clientId, path, body }) {
+  let response;
+  try {
+    response = await fetch(buildProxyUrl(path), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-EasyRead-Client-Id": clientId,
+        "X-EasyRead-Extension-Id": chrome.runtime.id
+      },
+      body: JSON.stringify(body)
+    });
+  } catch (_error) {
+    throw new EasyReadError("Network error while contacting EasyRead server.", "NETWORK_RETRYABLE", true);
+  }
+
+  if (response.status === 429 || response.status >= 500) {
+    throw new EasyReadError(
+      `EasyRead server temporary error (${response.status}).`,
+      "PROXY_RETRYABLE",
+      true
+    );
+  }
+
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new EasyReadError(
+      `EasyRead server error (${response.status}). ${bodyText.slice(0, 180)}`,
+      "PROXY_ERROR"
+    );
+  }
+
+  return response;
 }
 
 function toUserErrorMessage(error) {

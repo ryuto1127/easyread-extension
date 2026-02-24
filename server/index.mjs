@@ -46,6 +46,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && parsedUrl.pathname === "/api/explain-stream") {
+    await handleExplainStream(req, res);
+    return;
+  }
+
   if (req.method === "POST" && parsedUrl.pathname === "/api/moderate") {
     await handleModerate(req, res);
     return;
@@ -116,6 +121,88 @@ async function handleExplain(req, res) {
 
     sendRawJson(res, 200, text);
   } catch (_error) {
+    sendJson(res, 502, { error: "Upstream network error" });
+  }
+}
+
+async function handleExplainStream(req, res) {
+  if (!isAllowedExtension(req, res)) {
+    return;
+  }
+
+  const rate = checkRateLimit(req);
+  if (!rate.ok) {
+    sendJson(res, 429, {
+      error: "Rate limit exceeded",
+      retryAfterSec: rate.retryAfterSec
+    }, {
+      "Retry-After": String(rate.retryAfterSec)
+    });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readJsonBody(req, MAX_BODY_BYTES);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message || "Invalid JSON body" });
+    return;
+  }
+
+  const payload = sanitizeResponsesPayload(body?.payload);
+  if (!payload) {
+    sendJson(res, 400, { error: "Missing payload object" });
+    return;
+  }
+
+  const model = String(payload.model || "").trim();
+  if (model !== ALLOWED_MODEL) {
+    sendJson(res, 400, { error: "Model is not allowed. Use gpt-5-mini." });
+    return;
+  }
+  payload.model = model;
+  payload.stream = true;
+
+  try {
+    const openAiRes = await fetch(`${OPENAI_BASE_URL}/responses`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.openAiKey}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!openAiRes.ok) {
+      const text = await openAiRes.text();
+      sendJson(res, openAiRes.status, {
+        error: `OpenAI responses failed (${openAiRes.status})`,
+        detail: text.slice(0, 2000)
+      });
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store",
+      Connection: "keep-alive"
+    });
+    res.flushHeaders?.();
+
+    if (!openAiRes.body) {
+      res.end();
+      return;
+    }
+
+    for await (const chunk of openAiRes.body) {
+      res.write(chunk);
+    }
+    res.end();
+  } catch (_error) {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
     sendJson(res, 502, { error: "Upstream network error" });
   }
 }

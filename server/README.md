@@ -6,6 +6,7 @@ Backend proxy for EasyRead Chrome extension.
 
 - Keeps `OPENAI_API_KEY` on server (not in extension)
 - Proxies `/api/explain` to OpenAI Responses API
+- Proxies `/api/explain-stream` to OpenAI Responses API (streaming)
 - Proxies `/api/moderate` to OpenAI Moderations API
 - Applies anonymous rate limits
 
