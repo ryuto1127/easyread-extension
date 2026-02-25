@@ -6,6 +6,7 @@
 
   const HARD_MAX_CHARS = 12000;
   const CHUNK_THRESHOLD_CHARS = 4500;
+  const WARMUP_COOLDOWN_MS = 45_000;
 
   const state = {
     selectedText: "",
@@ -18,7 +19,8 @@
     explanationMode: "balanced",
     wordLevelThreshold: "B2",
     streamedExplanation: "",
-    isExplainInFlight: false
+    isExplainInFlight: false,
+    lastWarmupAt: 0
   };
 
   const root = document.createElement("div");
@@ -125,6 +127,7 @@
     runtimeApi.onMessage.addListener((message) => {
       if (message?.type === "easyread-context-explain") {
         const textFromMenu = typeof message.selectionText === "string" ? message.selectionText.trim() : "";
+        maybeWarmup();
         runExplain(textFromMenu || getSelectionText());
         return;
       }
@@ -177,6 +180,7 @@
     state.selectionRect = rect;
     positionExplainButton(rect);
     explainButton.hidden = false;
+    maybeWarmup();
   }
 
   function positionExplainButton(rect) {
@@ -204,6 +208,7 @@
   }
 
   async function runExplain(explicitText = "", options = {}) {
+    maybeWarmup();
     const isRefine = Boolean(options.isRefine);
     const requestedMode = normalizeExplanationMode(options.explanationMode || state.explanationMode);
     state.explanationMode = requestedMode;
@@ -308,11 +313,7 @@
 
     renderExplanation(result);
     renderWords(result, options.wordsPending);
-
-    const confidence = typeof result.confidence === "number" ? result.confidence.toFixed(2) : "0.50";
-    const speedNote = options.wordsPending ? " • explanation ready, loading words..." : "";
-    const modeLabel = getModeLabel(options.explanationMode || state.explanationMode);
-    showStatus(`${cached ? "Cache hit" : "Fresh"} • ${modeLabel} • confidence ${confidence}${speedNote}`);
+    showStatus(options.wordsPending ? "Loading words..." : "Ready");
   }
 
   function renderExplanation(result) {
@@ -384,7 +385,7 @@
 
     if (message?.error) {
       wordsPanel.textContent = message.error;
-      showStatus("Explanation ready • words update failed");
+      showStatus("Words failed");
       return;
     }
 
@@ -403,7 +404,7 @@
     }
     renderExplanation(result);
     renderWords(result, false);
-    showStatus(`Explanation ready • ${getModeLabel(state.explanationMode)} • words updated`);
+    showStatus("Ready");
   }
 
   function handleExplanationStream(message) {
@@ -425,7 +426,7 @@
         if (!hasWords) {
           wordsPanel.textContent = "Loading difficult words...";
         }
-        showStatus(`Streaming • ${getModeLabel(state.explanationMode)}...`);
+        showStatus("Streaming...");
       }
     }
   }
@@ -479,7 +480,7 @@
       state.lastResult = result;
       renderExplanation(result);
       renderWords(result, false);
-      showStatus(`Explanation ready • ${getModeLabel(explanationMode)} • words updated`);
+      showStatus("Ready");
     } catch (error) {
       if (current !== state.currentRequestId) {
         return;
@@ -488,7 +489,7 @@
         error instanceof Error && error.message
           ? error.message
           : "Words took too long. Please try again.";
-      showStatus("Explanation ready • words update failed");
+      showStatus("Words failed");
     } finally {
       if (state.wordsFetchRequestId === current) {
         state.wordsFetchRequestId = "";
@@ -498,8 +499,7 @@
 
   function setLoading(isLoading, explanationMode = "balanced", isRefine = false) {
     if (isLoading) {
-      const modeLabel = getModeLabel(explanationMode);
-      showStatus(isRefine ? `Updating (${modeLabel})...` : `Working (${modeLabel})...`);
+      showStatus(isRefine ? "Updating..." : "Working...");
       explanationPanel.innerHTML = '<div class="easyread-loading">Creating explanation</div>';
       const hasExistingWords = getRenderableWords(state.lastResult?.a2_plus_words).length > 0;
       if (!isRefine || !hasExistingWords) {
@@ -507,8 +507,8 @@
       }
     } else if (
       !statusEl.textContent ||
-      statusEl.textContent.startsWith("Working (") ||
-      statusEl.textContent.startsWith("Updating (")
+      statusEl.textContent.startsWith("Working") ||
+      statusEl.textContent.startsWith("Updating")
     ) {
       showStatus("Ready");
     }
@@ -572,6 +572,15 @@
       return crypto.randomUUID();
     }
     return `req-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  }
+
+  function maybeWarmup() {
+    const now = Date.now();
+    if (now - state.lastWarmupAt < WARMUP_COOLDOWN_MS) {
+      return;
+    }
+    state.lastWarmupAt = now;
+    sendRuntimeMessage({ type: "easyread-warmup" }).catch(() => {});
   }
 
   function sendRuntimeMessage(message) {

@@ -18,6 +18,7 @@ import {
 const PROXY_BASE_URL = "https://easyread-extension.onrender.com";
 const PROXY_EXPLAIN_PATH = "/api/explain";
 const PROXY_EXPLAIN_STREAM_PATH = "/api/explain-stream";
+const PROXY_HEALTH_PATH = "/api/health";
 const CONTEXT_MENU_ID = "easyread_explain";
 const EXPLAIN_MODEL = "gpt-5-mini";
 const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
@@ -37,6 +38,7 @@ const MAX_OUTPUT_TOKENS = 2600;
 const HARD_MAX_CHARS = 20000;
 const WORD_FETCH_TIMEOUT_MS = 20000;
 const WORD_MAX_OUTPUT_TOKENS = 1800;
+const WARMUP_COOLDOWN_MS = 45_000;
 const POS_VALUE_SET = new Set(["noun", "verb", "adj", "adv", "prep", "pron", "det", "conj", "other"]);
 const LOW_VALUE_WORD_SET = new Set([
   "a",
@@ -129,14 +131,19 @@ class EasyReadError extends Error {
   }
 }
 
+let proxyWarmupInFlight = null;
+let lastProxyWarmupAt = 0;
+
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureSettings();
   await pruneExpiredCacheEntries();
   await createContextMenu();
+  void warmProxyConnection(true);
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   await createContextMenu();
+  void warmProxyConnection(true);
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -169,6 +176,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     clearCache()
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: toUserErrorMessage(error) }));
+    return true;
+  }
+
+  if (message?.type === "easyread-warmup") {
+    warmProxyConnection()
+      .then((warmed) => sendResponse({ ok: true, warmed }))
+      .catch(() => sendResponse({ ok: true, warmed: false }));
     return true;
   }
 
@@ -1654,6 +1668,33 @@ async function getOrCreateAnonymousClientId(settings) {
 
 function buildProxyUrl(path) {
   return `${PROXY_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+async function warmProxyConnection(force = false) {
+  const now = Date.now();
+  if (!force && now - lastProxyWarmupAt < WARMUP_COOLDOWN_MS) {
+    return false;
+  }
+  if (proxyWarmupInFlight) {
+    return proxyWarmupInFlight;
+  }
+
+  proxyWarmupInFlight = (async () => {
+    try {
+      const response = await fetch(buildProxyUrl(PROXY_HEALTH_PATH), {
+        method: "GET",
+        cache: "no-store"
+      });
+      return response.ok;
+    } catch (_error) {
+      return false;
+    } finally {
+      lastProxyWarmupAt = Date.now();
+      proxyWarmupInFlight = null;
+    }
+  })();
+
+  return proxyWarmupInFlight;
 }
 
 async function postProxyJson({ clientId, path, body }) {
