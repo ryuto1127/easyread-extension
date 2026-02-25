@@ -48,7 +48,8 @@ p {
   margin-bottom: 12px;
 }
 
-.field span {
+.field span,
+.field label {
   font-weight: 600;
 }
 
@@ -90,7 +91,8 @@ button.primary {
   color: #ffffff;
 }
 
-#status {
+#settingsStatus,
+#cacheStatus {
   color: #475569;
   font-size: 12px;
 }

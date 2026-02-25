@@ -16,6 +16,7 @@
     currentRequestId: "",
     wordsFetchRequestId: "",
     explanationMode: "balanced",
+    wordLevelThreshold: "B2",
     streamedExplanation: "",
     isExplainInFlight: false
   };
@@ -254,6 +255,9 @@
       if (response.data?.requestId && response.data.requestId !== state.currentRequestId) {
         return;
       }
+      if (response.data?.wordLevelThreshold) {
+        state.wordLevelThreshold = normalizeWordLevelThreshold(response.data.wordLevelThreshold);
+      }
 
       let nextResult = response.data?.result || null;
       if (isRefine && nextResult && typeof nextResult === "object") {
@@ -356,7 +360,9 @@
       return;
     }
 
-    wordsPanel.textContent = isPending ? "Loading difficult words..." : "No C1+ words found.";
+    wordsPanel.textContent = isPending
+      ? "Loading difficult words..."
+      : `No ${formatWordLevelLabel(state.wordLevelThreshold)} words found.`;
   }
 
   function getRenderableWords(words) {
@@ -388,6 +394,9 @@
     }
 
     state.lastResult = result;
+    if (message?.wordLevelThreshold) {
+      state.wordLevelThreshold = normalizeWordLevelThreshold(message.wordLevelThreshold);
+    }
     if (message?.explanationMode) {
       state.explanationMode = normalizeExplanationMode(message.explanationMode);
       updateModeButtons();
@@ -457,6 +466,9 @@
       }
       if (response.data?.requestId && response.data.requestId !== state.currentRequestId) {
         return;
+      }
+      if (response.data?.wordLevelThreshold) {
+        state.wordLevelThreshold = normalizeWordLevelThreshold(response.data.wordLevelThreshold);
       }
 
       const result = response.data?.result;
@@ -541,7 +553,7 @@
 
     if (wordItems.length > 0) {
       lines.push("");
-      lines.push("Words (C1+):");
+      lines.push(`Words (${formatWordLevelLabel(state.wordLevelThreshold)}):`);
       for (const item of wordItems) {
         lines.push(
           `- ${item.word} (${item.lemma}, ${item.pos}, ${item.cefr}): ${item.definition_simple} Example: ${item.example_simple}`
@@ -615,6 +627,19 @@
       return raw;
     }
     return "balanced";
+  }
+
+  function normalizeWordLevelThreshold(value) {
+    const raw = typeof value === "string" ? value.trim().toUpperCase() : "";
+    if (raw === "B2" || raw === "C1" || raw === "C2") {
+      return raw;
+    }
+    return "B2";
+  }
+
+  function formatWordLevelLabel(level) {
+    const normalized = normalizeWordLevelThreshold(level);
+    return normalized === "C2" ? "C2" : `${normalized}+`;
   }
 
   function getModeLabel(mode) {

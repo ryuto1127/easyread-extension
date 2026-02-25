@@ -19,11 +19,28 @@
       </header>
 
       <section class="card">
+        <h2>Word Level</h2>
+        <p>Choose the minimum CEFR level for words to show in the Words section.</p>
+        <div class="field">
+          <label for="wordLevelThreshold">Show words at or above</label>
+          <select id="wordLevelThreshold">
+            <option value="B2">B2+</option>
+            <option value="C1">C1+</option>
+            <option value="C2">C2 only</option>
+          </select>
+        </div>
+        <div class="actions">
+          <button type="button" id="saveWordLevel" class="primary">Save</button>
+          <span id="settingsStatus" role="status" aria-live="polite"></span>
+        </div>
+      </section>
+
+      <section class="card">
         <h2>Cache</h2>
         <p>Clear saved explanations if you want to force fresh results.</p>
         <div class="actions">
           <button type="button" id="clearCache">Clear Cache</button>
-          <span id="status" role="status" aria-live="polite"></span>
+          <span id="cacheStatus" role="status" aria-live="polite"></span>
         </div>
       </section>
     </main>

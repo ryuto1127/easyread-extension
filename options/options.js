@@ -1,9 +1,42 @@
-import { CACHE_KEY } from "../src/lib/constants.js";
+import {
+  CACHE_KEY,
+  DEFAULT_SETTINGS,
+  SETTINGS_KEY,
+  WORD_LEVEL_VALUES
+} from "../src/lib/constants.js";
 
-const statusEl = document.getElementById("status");
+const settingsStatusEl = document.getElementById("settingsStatus");
+const cacheStatusEl = document.getElementById("cacheStatus");
 const clearCacheButton = document.getElementById("clearCache");
+const saveWordLevelButton = document.getElementById("saveWordLevel");
+const wordLevelSelect = document.getElementById("wordLevelThreshold");
 
 clearCacheButton.addEventListener("click", onClearCache);
+saveWordLevelButton.addEventListener("click", onSaveWordLevel);
+void loadSettings();
+
+async function loadSettings() {
+  const stored = await chrome.storage.local.get([SETTINGS_KEY]);
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    ...(stored[SETTINGS_KEY] || {})
+  };
+  wordLevelSelect.value = normalizeWordLevelThreshold(settings.wordLevelThreshold);
+}
+
+async function onSaveWordLevel() {
+  const selectedLevel = normalizeWordLevelThreshold(wordLevelSelect.value);
+  const stored = await chrome.storage.local.get([SETTINGS_KEY]);
+  const nextSettings = {
+    ...DEFAULT_SETTINGS,
+    ...(stored[SETTINGS_KEY] || {}),
+    wordLevelThreshold: selectedLevel
+  };
+  await chrome.storage.local.set({
+    [SETTINGS_KEY]: nextSettings
+  });
+  setSettingsStatus(`Saved: ${selectedLevel}+`);
+}
 
 async function onClearCache() {
   try {
@@ -14,14 +47,28 @@ async function onClearCache() {
   } catch (_err) {
     await chrome.storage.local.set({ [CACHE_KEY]: {} });
   }
-  setStatus("Cache cleared");
+  setCacheStatus("Cache cleared");
 }
 
-function setStatus(text) {
-  statusEl.textContent = text;
+function normalizeWordLevelThreshold(value) {
+  const level = String(value || "").trim().toUpperCase();
+  return WORD_LEVEL_VALUES.includes(level) ? level : DEFAULT_SETTINGS.wordLevelThreshold;
+}
+
+function setSettingsStatus(text) {
+  settingsStatusEl.textContent = text;
   window.setTimeout(() => {
-    if (statusEl.textContent === text) {
-      statusEl.textContent = "";
+    if (settingsStatusEl.textContent === text) {
+      settingsStatusEl.textContent = "";
+    }
+  }, 1500);
+}
+
+function setCacheStatus(text) {
+  cacheStatusEl.textContent = text;
+  window.setTimeout(() => {
+    if (cacheStatusEl.textContent === text) {
+      cacheStatusEl.textContent = "";
     }
   }, 1500);
 }

@@ -1,5 +1,5 @@
 import { A1_A2_WORD_SET } from "./data/a1a2Words.js";
-import { EASYREAD_JSON_SCHEMA, MODEL_VERSION } from "./lib/constants.js";
+import { EASYREAD_JSON_SCHEMA, MODEL_VERSION, WORD_LEVEL_VALUES } from "./lib/constants.js";
 import {
   parseAndNormalizeWordCoverage,
   extractOutputText,
@@ -22,10 +22,19 @@ const CONTEXT_MENU_ID = "easyread_explain";
 const EXPLAIN_MODEL = "gpt-5-mini";
 const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
 const DEFAULT_EXPLANATION_MODE = "balanced";
+const DEFAULT_WORD_LEVEL_THRESHOLD = "B2";
+const WORD_LEVEL_THRESHOLD_VALUES = new Set(WORD_LEVEL_VALUES);
+const CEFR_RANK = {
+  A2: 1,
+  B1: 2,
+  B2: 3,
+  C1: 4,
+  C2: 5,
+  unknown: 0
+};
 const MAX_A2_CANDIDATES = 28;
 const MAX_OUTPUT_TOKENS = 2600;
 const HARD_MAX_CHARS = 20000;
-const C1_PLUS_LEVELS = new Set(["C1", "C2"]);
 const WORD_FETCH_TIMEOUT_MS = 20000;
 const WORD_MAX_OUTPUT_TOKENS = 1800;
 const POS_VALUE_SET = new Set(["noun", "verb", "adj", "adv", "prep", "pron", "det", "conj", "other"]);
@@ -185,6 +194,7 @@ async function handleExplainRequest(payload, sender) {
   const selectedText = normalizeSelection(payload.selectedText);
   const requestId = normalizeRequestId(payload.requestId);
   const explanationMode = normalizeExplanationMode(payload.explanationMode);
+  const wordLevelThreshold = normalizeWordLevelThreshold(settings.wordLevelThreshold);
 
   if (!selectedText) {
     throw new EasyReadError("Please select text first.", "NO_SELECTION");
@@ -203,6 +213,7 @@ async function handleExplainRequest(payload, sender) {
     pageOrigin,
     selectedText,
     explanationMode,
+    wordLevelThreshold,
     model: selectedModel,
     modelVersion: MODEL_VERSION
   });
@@ -230,7 +241,8 @@ async function handleExplainRequest(payload, sender) {
             result: safeCached,
             requestId,
             wordsPending: true,
-            explanationMode
+            explanationMode,
+            wordLevelThreshold
           };
         }
       }
@@ -239,7 +251,8 @@ async function handleExplainRequest(payload, sender) {
         result: safeCached,
         requestId,
         wordsPending: false,
-        explanationMode
+        explanationMode,
+        wordLevelThreshold
       };
     }
   }
@@ -271,6 +284,7 @@ async function handleExplainRequest(payload, sender) {
     {
       selectedText,
       explanationMode,
+      wordLevelThreshold,
       model: selectedModel
     },
     safeImmediateResult
@@ -281,7 +295,8 @@ async function handleExplainRequest(payload, sender) {
     result: safeImmediateResult,
     requestId,
     wordsPending,
-    explanationMode
+    explanationMode,
+    wordLevelThreshold
   };
 }
 
@@ -290,6 +305,7 @@ async function handleFetchWordsRequest(payload, _sender) {
   const selectedText = normalizeSelection(payload.selectedText);
   const requestId = normalizeRequestId(payload.requestId);
   const explanationMode = normalizeExplanationMode(payload.explanationMode);
+  const wordLevelThreshold = normalizeWordLevelThreshold(settings.wordLevelThreshold);
 
   if (!selectedText) {
     throw new EasyReadError("Please select text first.", "NO_SELECTION");
@@ -308,6 +324,7 @@ async function handleFetchWordsRequest(payload, _sender) {
     pageOrigin,
     selectedText,
     explanationMode,
+    wordLevelThreshold,
     model: selectedModel,
     modelVersion: MODEL_VERSION
   });
@@ -328,7 +345,8 @@ async function handleFetchWordsRequest(payload, _sender) {
         result: safeCached,
         requestId,
         wordsPending: false,
-        explanationMode
+        explanationMode,
+        wordLevelThreshold
       };
     }
   }
@@ -349,7 +367,7 @@ async function handleFetchWordsRequest(payload, _sender) {
       {
         ...baseResult,
         a2_plus_words: [],
-        notes: appendNote(baseResult.notes || "", "No C1+ words were detected with enough confidence.")
+        notes: appendNote(baseResult.notes || "", `No ${formatWordLevelLabel(wordLevelThreshold)} words were detected with enough confidence.`)
       },
       selectedText
     );
@@ -359,6 +377,7 @@ async function handleFetchWordsRequest(payload, _sender) {
       {
         selectedText,
         explanationMode,
+        wordLevelThreshold,
         model: selectedModel
       },
       safeNoWords
@@ -368,11 +387,12 @@ async function handleFetchWordsRequest(payload, _sender) {
       result: safeNoWords,
       requestId,
       wordsPending: false,
-      explanationMode
+      explanationMode,
+      wordLevelThreshold
     };
   }
 
-  const wordLimit = getWordResultLimit(selectedText.length);
+  const wordLimit = getWordResultLimit(selectedText.length, wordLevelThreshold);
   let words = [];
   try {
     words = await withTimeout(
@@ -381,7 +401,8 @@ async function handleFetchWordsRequest(payload, _sender) {
         model: selectedModel,
         selectedText,
         candidateHints: candidates,
-        wordLimit
+        wordLimit,
+        wordLevelThreshold
       }),
       WORD_FETCH_TIMEOUT_MS
     );
@@ -389,10 +410,10 @@ async function handleFetchWordsRequest(payload, _sender) {
     words = [];
   }
 
-  let finalWordItems = normalizeAndCompleteWordEntries(words, wordLimit);
+  let finalWordItems = normalizeAndCompleteWordEntries(words, wordLimit, wordLevelThreshold);
   let finalNotes = baseResult.notes || "";
   if (finalWordItems.length === 0) {
-    finalNotes = appendNote(finalNotes, "EasyRead could not find clear C1+ words in this text.");
+    finalNotes = appendNote(finalNotes, `EasyRead could not find clear ${formatWordLevelLabel(wordLevelThreshold)} words in this text.`);
   }
 
   const finalResult = enforceEasyLanguage(
@@ -409,6 +430,7 @@ async function handleFetchWordsRequest(payload, _sender) {
     {
       selectedText,
       explanationMode,
+      wordLevelThreshold,
       model: selectedModel
     },
     safeFinalResult
@@ -419,7 +441,8 @@ async function handleFetchWordsRequest(payload, _sender) {
     result: safeFinalResult,
     requestId,
     wordsPending: false,
-    explanationMode
+    explanationMode,
+    wordLevelThreshold
   };
 }
 
@@ -440,6 +463,16 @@ function normalizeRequestId(value) {
 function normalizeExplanationMode(mode) {
   const normalized = typeof mode === "string" ? mode.trim().toLowerCase() : "";
   return EXPLANATION_MODES.has(normalized) ? normalized : DEFAULT_EXPLANATION_MODE;
+}
+
+function normalizeWordLevelThreshold(value) {
+  const level = String(value || "").trim().toUpperCase();
+  return WORD_LEVEL_THRESHOLD_VALUES.has(level) ? level : DEFAULT_WORD_LEVEL_THRESHOLD;
+}
+
+function formatWordLevelLabel(level) {
+  const normalized = normalizeWordLevelThreshold(level);
+  return normalized === "C2" ? "C2" : `${normalized}+`;
 }
 
 function appendNote(base, addition) {
@@ -489,6 +522,7 @@ async function buildCacheKey(parts) {
     parts.pageOrigin || "",
     parts.selectedText || "",
     parts.explanationMode || "",
+    parts.wordLevelThreshold || "",
     parts.model || "",
     parts.modelVersion || ""
   ].join("||");
@@ -636,17 +670,18 @@ function getExplanationLengthGuidance(selectionLength, explanationMode) {
   return "Write 4 to 6 sentences.";
 }
 
-function getWordResultLimit(selectionLength) {
+function getWordResultLimit(selectionLength, wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD) {
+  const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
   if (selectionLength <= 180) {
-    return 4;
+    return threshold === "C2" ? 2 : threshold === "C1" ? 3 : 4;
   }
   if (selectionLength <= 500) {
-    return 6;
+    return threshold === "C2" ? 4 : threshold === "C1" ? 5 : 6;
   }
   if (selectionLength <= 1200) {
-    return 8;
+    return threshold === "C2" ? 6 : threshold === "C1" ? 7 : 8;
   }
-  return 10;
+  return threshold === "C2" ? 8 : threshold === "C1" ? 9 : 10;
 }
 
 function getExplanationOnlyTokenBudget(selectionLength, explanationMode = DEFAULT_EXPLANATION_MODE) {
@@ -681,24 +716,33 @@ function hasText(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function isC1PlusWordEntry(item) {
+function isWordEntryAtOrAboveThreshold(item, wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD) {
   if (!item || typeof item !== "object") {
     return false;
   }
-  const cefr = String(item.cefr || "").toUpperCase();
-  return C1_PLUS_LEVELS.has(cefr) && hasText(item.definition_simple) && hasText(item.example_simple);
+  const cefr = normalizeCefrLevel(item.cefr);
+  return (
+    isCefrAtOrAboveThreshold(cefr, wordLevelThreshold) &&
+    hasText(item.definition_simple) &&
+    hasText(item.example_simple)
+  );
 }
 
-function keepC1PlusWords(entries) {
-  return (entries || []).filter(isC1PlusWordEntry);
+function keepWordsAtOrAboveThreshold(entries, wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD) {
+  return (entries || []).filter((item) => isWordEntryAtOrAboveThreshold(item, wordLevelThreshold));
 }
 
-function normalizeAndCompleteWordEntries(entries, wordLimit = 12) {
-  return normalizeWordEntriesWithFallback(entries, wordLimit);
+function normalizeAndCompleteWordEntries(entries, wordLimit = 12, wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD) {
+  return normalizeWordEntriesWithFallback(entries, wordLimit, wordLevelThreshold);
 }
 
-function normalizeWordEntriesWithFallback(entries, wordLimit = 12) {
+function normalizeWordEntriesWithFallback(
+  entries,
+  wordLimit = 12,
+  wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD
+) {
   const safeLimit = Math.max(1, Math.min(Number(wordLimit) || 12, 16));
+  const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
   const seen = new Set();
   const result = [];
 
@@ -718,7 +762,7 @@ function normalizeWordEntriesWithFallback(entries, wordLimit = 12) {
       continue;
     }
     const pos = normalizePosValue(item?.pos, word);
-    const cefr = normalizeCefrC1Plus(item?.cefr);
+    const cefr = normalizeCefrLevel(item?.cefr);
     const definition = hasText(item?.definition_simple) ? String(item.definition_simple).trim() : "";
     const example = hasText(item?.example_simple) ? String(item.example_simple).trim() : "";
 
@@ -736,7 +780,7 @@ function normalizeWordEntriesWithFallback(entries, wordLimit = 12) {
     }
   }
 
-  return keepC1PlusWords(result);
+  return keepWordsAtOrAboveThreshold(result, threshold);
 }
 
 function normalizeLemma(value) {
@@ -795,12 +839,26 @@ function normalizePosValue(pos, word) {
   return "other";
 }
 
-function normalizeCefrC1Plus(value) {
+function normalizeCefrLevel(value) {
   const cefr = String(value || "").trim().toUpperCase();
-  if (C1_PLUS_LEVELS.has(cefr)) {
+  if (cefr === "B2" || cefr === "C1" || cefr === "C2") {
     return cefr;
   }
-  return "C1";
+  return "unknown";
+}
+
+function isCefrAtOrAboveThreshold(cefr, wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD) {
+  const normalizedLevel = normalizeWordLevelThreshold(wordLevelThreshold);
+  const currentRank = CEFR_RANK[String(cefr || "unknown")] || 0;
+  const minRank = CEFR_RANK[normalizedLevel] || CEFR_RANK[DEFAULT_WORD_LEVEL_THRESHOLD];
+  return currentRank >= minRank;
+}
+
+function getLevelsBelowThreshold(wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD) {
+  const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
+  const thresholdRank = CEFR_RANK[threshold] || CEFR_RANK[DEFAULT_WORD_LEVEL_THRESHOLD];
+  const allLevels = ["A2", "B1", "B2", "C1", "C2"];
+  return allLevels.filter((level) => (CEFR_RANK[level] || 0) < thresholdRank);
 }
 
 function isLikelyProperNameWord(word) {
@@ -831,12 +889,16 @@ async function callModelForB2PlusWords({
   model,
   selectedText,
   candidateHints,
-  wordLimit = 18
+  wordLimit = 18,
+  wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD
 }) {
+  const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
+  const thresholdLabel = formatWordLevelLabel(threshold);
+  const belowLevels = getLevelsBelowThreshold(threshold).join(", ");
   const systemPrompt = `
 You extract difficult words and explain them for learners.
 Return JSON only.
-Return only words at C1 or C2 level.
+Return only words at ${thresholdLabel} level.
 Include any part of speech: noun, verb, adjective, adverb, preposition, pronoun, determiner, conjunction.
 `;
   const userPrompt = `
@@ -849,10 +911,10 @@ Candidate hints (not all are hard enough):
 ${JSON.stringify(candidateHints || [])}
 
 Rules:
-1) Include the most useful C1/C2 words that appear in the selected text.
+1) Include the most useful words at ${thresholdLabel} that appear in the selected text.
 2) Return at most ${wordLimit} entries.
-3) Do not include A1, A2, B1, or B2 words.
-4) Set cefr only to C1 or C2.
+3) Do not include words below ${threshold}. (${belowLevels})
+4) Set cefr accurately to one of: B2, C1, C2.
 5) Fill lemma, pos, cefr, definition_simple, example_simple.
 6) definition_simple and example_simple must not be empty.
 7) definition_simple must explain the word in this context in at least 5 words.
@@ -1406,7 +1468,7 @@ function simplifyNoteText(note) {
     return "";
   }
   if (lower.includes("no words above b1")) {
-    return "EasyRead did not find clear C1+ words.";
+    return "EasyRead did not find clear hard words.";
   }
 
   return simplifyToEasyText(raw, "");
