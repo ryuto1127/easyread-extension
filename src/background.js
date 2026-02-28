@@ -24,6 +24,7 @@ const EXPLAIN_MODEL = "gpt-5-mini";
 const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
 const DEFAULT_EXPLANATION_MODE = "balanced";
 const DEFAULT_WORD_LEVEL_THRESHOLD = "B2";
+const WORD_DISCOVERY_BASE_THRESHOLD = DEFAULT_WORD_LEVEL_THRESHOLD;
 const WORD_LEVEL_THRESHOLD_VALUES = new Set(WORD_LEVEL_VALUES);
 const CEFR_RANK = {
   A2: 1,
@@ -179,6 +180,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "easyread-get-settings") {
+    getSettings()
+      .then((settings) =>
+        sendResponse({
+          ok: true,
+          data: {
+            wordLevelThreshold: normalizeWordLevelThreshold(settings.wordLevelThreshold)
+          }
+        })
+      )
+      .catch((error) => sendResponse({ ok: false, error: toUserErrorMessage(error) }));
+    return true;
+  }
+
+  if (message?.type === "easyread-update-settings") {
+    updateRuntimeSettings(message.payload || {})
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: toUserErrorMessage(error) }));
+    return true;
+  }
+
   if (message?.type === "easyread-warmup") {
     warmProxyConnection()
       .then((warmed) => sendResponse({ ok: true, warmed }))
@@ -192,6 +214,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function ensureSettings() {
   const settings = await getSettings();
   await saveSettings(settings);
+}
+
+async function updateRuntimeSettings(payload) {
+  const current = await getSettings();
+  const patch = payload && typeof payload === "object" ? payload : {};
+  const next = {
+    ...current,
+    wordLevelThreshold: normalizeWordLevelThreshold(patch.wordLevelThreshold ?? current.wordLevelThreshold)
+  };
+  await saveSettings(next);
+  return {
+    wordLevelThreshold: next.wordLevelThreshold
+  };
 }
 
 async function createContextMenu() {
@@ -209,6 +244,7 @@ async function handleExplainRequest(payload, sender) {
   const requestId = normalizeRequestId(payload.requestId);
   const explanationMode = normalizeExplanationMode(payload.explanationMode);
   const wordLevelThreshold = normalizeWordLevelThreshold(settings.wordLevelThreshold);
+  const discoveryThreshold = WORD_DISCOVERY_BASE_THRESHOLD;
 
   if (!selectedText) {
     throw new EasyReadError("Please select text first.", "NO_SELECTION");
@@ -227,7 +263,7 @@ async function handleExplainRequest(payload, sender) {
     pageOrigin,
     selectedText,
     explanationMode,
-    wordLevelThreshold,
+    wordLevelThreshold: discoveryThreshold,
     model: selectedModel,
     modelVersion: MODEL_VERSION
   });
@@ -246,13 +282,14 @@ async function handleExplainRequest(payload, sender) {
       // Ignore invalid cached payload and fetch a fresh model result.
     } else {
       const cachedWords = Array.isArray(safeCached.a2_plus_words) ? safeCached.a2_plus_words : [];
+      const filteredCached = filterResultByWordLevel(safeCached, wordLevelThreshold);
       const cachedHasWords = cachedWords.length > 0;
       if (!cachedHasWords) {
         const cachedCandidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
         if (cachedCandidates.length > 0) {
           return {
             cached: true,
-            result: safeCached,
+            result: filteredCached,
             requestId,
             wordsPending: true,
             explanationMode,
@@ -262,7 +299,7 @@ async function handleExplainRequest(payload, sender) {
       }
       return {
         cached: true,
-        result: safeCached,
+        result: filteredCached,
         requestId,
         wordsPending: false,
         explanationMode,
@@ -298,7 +335,7 @@ async function handleExplainRequest(payload, sender) {
     {
       selectedText,
       explanationMode,
-      wordLevelThreshold,
+      wordLevelThreshold: discoveryThreshold,
       model: selectedModel
     },
     safeImmediateResult
@@ -320,6 +357,7 @@ async function handleFetchWordsRequest(payload, _sender) {
   const requestId = normalizeRequestId(payload.requestId);
   const explanationMode = normalizeExplanationMode(payload.explanationMode);
   const wordLevelThreshold = normalizeWordLevelThreshold(settings.wordLevelThreshold);
+  const discoveryThreshold = WORD_DISCOVERY_BASE_THRESHOLD;
 
   if (!selectedText) {
     throw new EasyReadError("Please select text first.", "NO_SELECTION");
@@ -338,7 +376,7 @@ async function handleFetchWordsRequest(payload, _sender) {
     pageOrigin,
     selectedText,
     explanationMode,
-    wordLevelThreshold,
+    wordLevelThreshold: discoveryThreshold,
     model: selectedModel,
     modelVersion: MODEL_VERSION
   });
@@ -354,9 +392,10 @@ async function handleFetchWordsRequest(payload, _sender) {
       selectedText
     );
     if (Array.isArray(safeCached.a2_plus_words) && safeCached.a2_plus_words.length > 0) {
+      const displayCached = filterResultByWordLevel(safeCached, wordLevelThreshold);
       return {
         cached: true,
-        result: safeCached,
+        result: displayCached,
         requestId,
         wordsPending: false,
         explanationMode,
@@ -366,10 +405,10 @@ async function handleFetchWordsRequest(payload, _sender) {
   }
 
   const baseResult =
-    payload?.baseResult && typeof payload.baseResult === "object"
-      ? payload.baseResult
-      : cached && typeof cached === "object"
-        ? cached
+    cached && typeof cached === "object"
+      ? cached
+      : payload?.baseResult && typeof payload.baseResult === "object"
+        ? payload.baseResult
         : null;
   if (!baseResult || !hasText(baseResult.simple_explanation)) {
     throw new EasyReadError("Base explanation is missing. Please click Explain again.", "MISSING_BASE_RESULT");
@@ -381,7 +420,7 @@ async function handleFetchWordsRequest(payload, _sender) {
       {
         ...baseResult,
         a2_plus_words: [],
-        notes: appendNote(baseResult.notes || "", `No ${formatWordLevelLabel(wordLevelThreshold)} words were detected with enough confidence.`)
+        notes: baseResult.notes || ""
       },
       selectedText
     );
@@ -391,14 +430,14 @@ async function handleFetchWordsRequest(payload, _sender) {
       {
         selectedText,
         explanationMode,
-        wordLevelThreshold,
+        wordLevelThreshold: discoveryThreshold,
         model: selectedModel
       },
       safeNoWords
     );
     return {
       cached: false,
-      result: safeNoWords,
+      result: filterResultByWordLevel(safeNoWords, wordLevelThreshold),
       requestId,
       wordsPending: false,
       explanationMode,
@@ -406,7 +445,7 @@ async function handleFetchWordsRequest(payload, _sender) {
     };
   }
 
-  const wordLimit = getWordResultLimit(selectedText.length, wordLevelThreshold);
+  const wordLimit = getWordResultLimit(selectedText.length, discoveryThreshold);
   let words = [];
   try {
     words = await withTimeout(
@@ -416,7 +455,7 @@ async function handleFetchWordsRequest(payload, _sender) {
         selectedText,
         candidateHints: candidates,
         wordLimit,
-        wordLevelThreshold
+        wordLevelThreshold: discoveryThreshold
       }),
       WORD_FETCH_TIMEOUT_MS
     );
@@ -424,17 +463,13 @@ async function handleFetchWordsRequest(payload, _sender) {
     words = [];
   }
 
-  let finalWordItems = normalizeAndCompleteWordEntries(words, wordLimit, wordLevelThreshold);
-  let finalNotes = baseResult.notes || "";
-  if (finalWordItems.length === 0) {
-    finalNotes = appendNote(finalNotes, `EasyRead could not find clear ${formatWordLevelLabel(wordLevelThreshold)} words in this text.`);
-  }
+  const finalWordItems = normalizeAndCompleteWordEntries(words, wordLimit, discoveryThreshold);
 
   const finalResult = enforceEasyLanguage(
     {
       ...baseResult,
       a2_plus_words: finalWordItems,
-      notes: finalNotes
+      notes: baseResult.notes || ""
     },
     selectedText
   );
@@ -444,15 +479,16 @@ async function handleFetchWordsRequest(payload, _sender) {
     {
       selectedText,
       explanationMode,
-      wordLevelThreshold,
+      wordLevelThreshold: discoveryThreshold,
       model: selectedModel
     },
     safeFinalResult
   );
+  const displayResult = filterResultByWordLevel(safeFinalResult, wordLevelThreshold);
 
   return {
     cached: false,
-    result: safeFinalResult,
+    result: displayResult,
     requestId,
     wordsPending: false,
     explanationMode,
@@ -748,6 +784,12 @@ function keepWordsAtOrAboveThreshold(entries, wordLevelThreshold = DEFAULT_WORD_
 
 function normalizeAndCompleteWordEntries(entries, wordLimit = 12, wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD) {
   return normalizeWordEntriesWithFallback(entries, wordLimit, wordLevelThreshold);
+}
+
+function filterResultByWordLevel(result, wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD) {
+  const safe = normalizeResultShape(result && typeof result === "object" ? { ...result } : {});
+  safe.a2_plus_words = keepWordsAtOrAboveThreshold(safe.a2_plus_words, wordLevelThreshold);
+  return safe;
 }
 
 function normalizeWordEntriesWithFallback(

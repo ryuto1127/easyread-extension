@@ -47,6 +47,14 @@
   display: none;
 }
 
+.easyread-overlay button,
+.easyread-overlay select,
+.easyread-overlay label {
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+}
+
 .easyread-header {
   display: flex;
   align-items: center;
@@ -74,6 +82,8 @@
   background: rgba(255, 255, 255, 0.17);
   color: white;
   font: 600 12px/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  text-transform: none;
+  letter-spacing: normal;
   cursor: pointer;
 }
 
@@ -103,6 +113,13 @@
 
 .easyread-text {
   white-space: pre-wrap;
+}
+
+.easyread-word-level-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  margin-top: -2px;
 }
 
 .easyread-word-item {
@@ -135,8 +152,16 @@
   background: #f8fafc;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 8px;
+}
+
+.easyread-control-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .easyread-mode-actions {
@@ -144,13 +169,61 @@
   gap: 6px;
 }
 
-.easyread-secondary-btn {
+.easyread-inline-setting {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+
+.easyread-inline-setting label {
+  font: 600 11px/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  color: #475569;
+}
+
+.easyread-inline-setting-words {
+  flex-shrink: 0;
+}
+
+.easyread-level-select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
   border: 1px solid rgba(37, 99, 235, 0.25);
   border-radius: 999px;
-  padding: 4px 9px;
+  background: #ffffff;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%232563eb' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 10px 6px;
+  color: #1d4ed8;
+  height: 26px;
+  min-width: 80px;
+  padding: 0 24px 0 10px;
+  font: 700 11px/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  text-align: center;
+  text-align-last: center;
+  text-transform: none;
+  letter-spacing: normal;
+  outline: none;
+}
+
+.easyread-level-select:focus {
+  border-color: #1d4ed8;
+}
+
+.easyread-secondary-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  border-radius: 999px;
+  min-height: 32px;
+  padding: 0 12px;
   background: #e8efff;
   color: #1d4ed8;
   font: 600 12px/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  text-transform: none;
+  letter-spacing: normal;
   cursor: pointer;
 }
 
@@ -165,9 +238,16 @@
 }
 
 .easyread-status {
+  display: none;
   font-size: 12px;
   color: #475569;
   text-align: right;
+}
+
+@media (max-width: 640px) {
+  .easyread-control-row {
+    justify-content: center;
+  }
 }
 
 .easyread-loading {

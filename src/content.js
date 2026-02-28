@@ -53,13 +53,24 @@
       </section>
       <section class="easyread-section">
         <h3 class="easyread-section-title">Words</h3>
+        <div class="easyread-word-level-row">
+          <div class="easyread-inline-setting easyread-inline-setting-words">
+            <select id="easyread-word-level" class="easyread-level-select" aria-label="Word level threshold">
+              <option value="B2">B2+</option>
+              <option value="C1">C1+</option>
+              <option value="C2">C2</option>
+            </select>
+          </div>
+        </div>
         <div data-panel="words"></div>
       </section>
     </div>
     <div class="easyread-footer">
-      <div class="easyread-mode-actions">
-        <button class="easyread-secondary-btn" type="button" data-action="mode-simple">More Simple</button>
-        <button class="easyread-secondary-btn" type="button" data-action="mode-detailed">More Detail</button>
+      <div class="easyread-control-row">
+        <div class="easyread-mode-actions">
+          <button class="easyread-secondary-btn" type="button" data-action="mode-simple">More Simple</button>
+          <button class="easyread-secondary-btn" type="button" data-action="mode-detailed">More Detail</button>
+        </div>
       </div>
       <div class="easyread-status" data-status>Ready</div>
     </div>
@@ -72,11 +83,19 @@
   const pinButton = overlay.querySelector('[data-action="pin"]');
   const modeSimpleButton = overlay.querySelector('[data-action="mode-simple"]');
   const modeDetailedButton = overlay.querySelector('[data-action="mode-detailed"]');
+  const wordLevelSelect = overlay.querySelector("#easyread-word-level");
 
   let selectionTimer = null;
 
   explainButton.addEventListener("click", () => runExplain());
   updateModeButtons();
+  updateWordLevelControl();
+  if (wordLevelSelect) {
+    wordLevelSelect.addEventListener("change", () => {
+      void handleWordLevelChange(wordLevelSelect.value);
+    });
+  }
+  void initializeOverlaySettings();
 
   overlay.addEventListener("click", (event) => {
     const action = event.target?.getAttribute("data-action");
@@ -262,6 +281,7 @@
       }
       if (response.data?.wordLevelThreshold) {
         state.wordLevelThreshold = normalizeWordLevelThreshold(response.data.wordLevelThreshold);
+        updateWordLevelControl();
       }
 
       let nextResult = response.data?.result || null;
@@ -397,6 +417,7 @@
     state.lastResult = result;
     if (message?.wordLevelThreshold) {
       state.wordLevelThreshold = normalizeWordLevelThreshold(message.wordLevelThreshold);
+      updateWordLevelControl();
     }
     if (message?.explanationMode) {
       state.explanationMode = normalizeExplanationMode(message.explanationMode);
@@ -470,6 +491,7 @@
       }
       if (response.data?.wordLevelThreshold) {
         state.wordLevelThreshold = normalizeWordLevelThreshold(response.data.wordLevelThreshold);
+        updateWordLevelControl();
       }
 
       const result = response.data?.result;
@@ -574,6 +596,69 @@
     return `req-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   }
 
+  async function initializeOverlaySettings() {
+    try {
+      const response = await sendRuntimeMessage({ type: "easyread-get-settings" });
+      if (!response?.ok) {
+        return;
+      }
+      const threshold = response?.data?.wordLevelThreshold;
+      if (threshold) {
+        state.wordLevelThreshold = normalizeWordLevelThreshold(threshold);
+        updateWordLevelControl();
+      }
+    } catch (_error) {
+      // Keep local defaults if settings load fails.
+    }
+  }
+
+  async function handleWordLevelChange(nextLevel) {
+    const normalizedNext = normalizeWordLevelThreshold(nextLevel);
+    const previous = state.wordLevelThreshold;
+    if (normalizedNext === previous) {
+      return;
+    }
+
+    state.wordLevelThreshold = normalizedNext;
+    updateWordLevelControl();
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: "easyread-update-settings",
+        payload: {
+          wordLevelThreshold: normalizedNext
+        }
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || "Failed to save setting.");
+      }
+
+      const savedLevel = normalizeWordLevelThreshold(response?.data?.wordLevelThreshold || normalizedNext);
+      state.wordLevelThreshold = savedLevel;
+      updateWordLevelControl();
+
+      const selectedText = (state.lastSelectionText || state.selectedText || getSelectionText()).trim();
+      if (!selectedText || !state.lastResult) {
+        showStatus("Saved");
+        return;
+      }
+
+      const requestId = state.currentRequestId || createRequestId();
+      state.currentRequestId = requestId;
+      wordsPanel.textContent = "Loading difficult words...";
+      showStatus("Updating words...");
+      await fetchWordsForCurrentRequest({
+        requestId,
+        selectedText,
+        explanationMode: state.explanationMode
+      });
+    } catch (_error) {
+      state.wordLevelThreshold = previous;
+      updateWordLevelControl();
+      showStatus("Save failed");
+    }
+  }
+
   function maybeWarmup() {
     const now = Date.now();
     if (now - state.lastWarmupAt < WARMUP_COOLDOWN_MS) {
@@ -627,6 +712,16 @@
     }
     if (modeDetailedButton) {
       modeDetailedButton.dataset.active = state.explanationMode === "detailed" ? "true" : "false";
+    }
+  }
+
+  function updateWordLevelControl() {
+    if (!wordLevelSelect) {
+      return;
+    }
+    const value = normalizeWordLevelThreshold(state.wordLevelThreshold);
+    if (wordLevelSelect.value !== value) {
+      wordLevelSelect.value = value;
     }
   }
 
