@@ -1,11 +1,11 @@
 import { A1_A2_WORD_SET } from "./data/a1a2Words.js";
+import { CEFR_WORD_LEVEL_MAP } from "./data/cefrWordLevels.js";
 import { EASYREAD_JSON_SCHEMA, MODEL_VERSION, WORD_LEVEL_VALUES } from "./lib/constants.js";
 import {
   parseAndNormalizeWordCoverage,
   extractOutputText,
   isOutputUsable
 } from "./lib/schema.js";
-import { extractA2PlusCandidates } from "./lib/simplicity.js";
 import {
   clearCache,
   getCachedResponse,
@@ -26,7 +26,9 @@ const DEFAULT_EXPLANATION_MODE = "balanced";
 const DEFAULT_WORD_LEVEL_THRESHOLD = "B2";
 const WORD_DISCOVERY_BASE_THRESHOLD = DEFAULT_WORD_LEVEL_THRESHOLD;
 const WORD_LEVEL_THRESHOLD_VALUES = new Set(WORD_LEVEL_VALUES);
+const TOKEN_REGEX = /[A-Za-z]+(?:'[A-Za-z]+)?/g;
 const CEFR_RANK = {
+  A1: 0,
   A2: 1,
   B1: 2,
   B2: 3,
@@ -182,14 +184,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "easyread-get-settings") {
     getSettings()
-      .then((settings) =>
+      .then((settings) => {
+        const visibility = normalizeVisibilityPair(settings);
+        return (
         sendResponse({
           ok: true,
           data: {
-            wordLevelThreshold: normalizeWordLevelThreshold(settings.wordLevelThreshold)
+            wordLevelThreshold: normalizeWordLevelThreshold(settings.wordLevelThreshold),
+            showExplanation: visibility.showExplanation,
+            showWords: visibility.showWords
           }
         })
-      )
+      );
+      })
       .catch((error) => sendResponse({ ok: false, error: toUserErrorMessage(error) }));
     return true;
   }
@@ -213,19 +220,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function ensureSettings() {
   const settings = await getSettings();
-  await saveSettings(settings);
+  const visibility = normalizeVisibilityPair(settings);
+  await saveSettings({
+    ...settings,
+    wordLevelThreshold: normalizeWordLevelThreshold(settings.wordLevelThreshold),
+    showExplanation: visibility.showExplanation,
+    showWords: visibility.showWords
+  });
 }
 
 async function updateRuntimeSettings(payload) {
   const current = await getSettings();
   const patch = payload && typeof payload === "object" ? payload : {};
+  const visibility = normalizeVisibilityPair({
+    showExplanation: patch.showExplanation ?? current.showExplanation,
+    showWords: patch.showWords ?? current.showWords
+  });
   const next = {
     ...current,
-    wordLevelThreshold: normalizeWordLevelThreshold(patch.wordLevelThreshold ?? current.wordLevelThreshold)
+    wordLevelThreshold: normalizeWordLevelThreshold(patch.wordLevelThreshold ?? current.wordLevelThreshold),
+    showExplanation: visibility.showExplanation,
+    showWords: visibility.showWords
   };
   await saveSettings(next);
   return {
-    wordLevelThreshold: next.wordLevelThreshold
+    wordLevelThreshold: next.wordLevelThreshold,
+    showExplanation: next.showExplanation,
+    showWords: next.showWords
   };
 }
 
@@ -285,7 +306,7 @@ async function handleExplainRequest(payload, sender) {
       const filteredCached = filterResultByWordLevel(safeCached, wordLevelThreshold);
       const cachedHasWords = cachedWords.length > 0;
       if (!cachedHasWords) {
-        const cachedCandidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
+        const cachedCandidates = extractWordCandidates(selectedText, discoveryThreshold, MAX_A2_CANDIDATES);
         if (cachedCandidates.length > 0) {
           return {
             cached: true,
@@ -313,6 +334,7 @@ async function handleExplainRequest(payload, sender) {
     clientId,
     model: selectedModel,
     explanationMode,
+    wordLevelThreshold: discoveryThreshold,
     requestId,
     streamTabId: typeof sender?.tab?.id === "number" ? sender.tab.id : null
   });
@@ -356,6 +378,7 @@ async function handleFetchWordsRequest(payload, _sender) {
   const selectedText = normalizeSelection(payload.selectedText);
   const requestId = normalizeRequestId(payload.requestId);
   const explanationMode = normalizeExplanationMode(payload.explanationMode);
+  const wordsOnly = Boolean(payload?.wordsOnly);
   const wordLevelThreshold = normalizeWordLevelThreshold(settings.wordLevelThreshold);
   const discoveryThreshold = WORD_DISCOVERY_BASE_THRESHOLD;
 
@@ -409,12 +432,19 @@ async function handleFetchWordsRequest(payload, _sender) {
       ? cached
       : payload?.baseResult && typeof payload.baseResult === "object"
         ? payload.baseResult
-        : null;
-  if (!baseResult || !hasText(baseResult.simple_explanation)) {
+        : wordsOnly
+          ? {
+              simple_explanation: "",
+              a2_plus_words: [],
+              notes: "",
+              confidence: 0.5
+            }
+          : null;
+  if (!baseResult || (!wordsOnly && !hasText(baseResult.simple_explanation))) {
     throw new EasyReadError("Base explanation is missing. Please click Explain again.", "MISSING_BASE_RESULT");
   }
 
-  const candidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
+  const candidates = extractWordCandidates(selectedText, discoveryThreshold, MAX_A2_CANDIDATES);
   if (candidates.length === 0) {
     const noWordsResult = enforceEasyLanguage(
       {
@@ -463,7 +493,11 @@ async function handleFetchWordsRequest(payload, _sender) {
     words = [];
   }
 
-  const finalWordItems = normalizeAndCompleteWordEntries(words, wordLimit, discoveryThreshold);
+  const finalWordItems = normalizeAndCompleteWordEntries(
+    applyLocalCefrLevels(words),
+    wordLimit,
+    discoveryThreshold
+  );
 
   const finalResult = enforceEasyLanguage(
     {
@@ -518,6 +552,25 @@ function normalizeExplanationMode(mode) {
 function normalizeWordLevelThreshold(value) {
   const level = String(value || "").trim().toUpperCase();
   return WORD_LEVEL_THRESHOLD_VALUES.has(level) ? level : DEFAULT_WORD_LEVEL_THRESHOLD;
+}
+
+function normalizeVisibilityValue(value, fallback = true) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return Boolean(fallback);
+}
+
+function normalizeVisibilityPair(values) {
+  let showExplanation = normalizeVisibilityValue(values?.showExplanation, true);
+  let showWords = normalizeVisibilityValue(values?.showWords, true);
+  if (!showExplanation && !showWords) {
+    showExplanation = true;
+  }
+  return {
+    showExplanation,
+    showWords
+  };
 }
 
 function formatWordLevelLabel(level) {
@@ -591,10 +644,11 @@ async function analyzeExplanationOnlySelection({
   clientId,
   model,
   explanationMode = DEFAULT_EXPLANATION_MODE,
+  wordLevelThreshold = WORD_DISCOVERY_BASE_THRESHOLD,
   requestId = "",
   streamTabId = null
 }) {
-  const candidates = extractA2PlusCandidates(selectedText, A1_A2_WORD_SET, MAX_A2_CANDIDATES);
+  const candidates = extractWordCandidates(selectedText, wordLevelThreshold, MAX_A2_CANDIDATES);
   const userPrompt = buildExplanationOnlyPrompt(selectedText, explanationMode);
   const tokenBudget = getExplanationOnlyTokenBudget(selectedText.length, explanationMode);
 
@@ -762,6 +816,83 @@ function normalizeWordKey(word) {
     .replace(/^'+|'+$/g, "");
 }
 
+function lookupLocalCefrLevel(word, lemma = "") {
+  const wordKey = normalizeWordKey(word);
+  const lemmaKey = normalizeWordKey(lemma);
+  const level =
+    CEFR_WORD_LEVEL_MAP[wordKey] ||
+    CEFR_WORD_LEVEL_MAP[lemmaKey] ||
+    CEFR_WORD_LEVEL_MAP[normalizeLemma(wordKey)] ||
+    CEFR_WORD_LEVEL_MAP[normalizeLemma(lemmaKey)] ||
+    "";
+  return normalizeCefrLevel(level);
+}
+
+function extractWordCandidates(
+  selectedText,
+  wordLevelThreshold = WORD_DISCOVERY_BASE_THRESHOLD,
+  maxCount = MAX_A2_CANDIDATES
+) {
+  const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
+  const safeLimit = Math.max(1, Number(maxCount) || MAX_A2_CANDIDATES);
+  const tokens = String(selectedText || "").match(TOKEN_REGEX) || [];
+  const seen = new Set();
+  const candidates = [];
+
+  for (const token of tokens) {
+    const key = normalizeWordKey(token);
+    if (!key || key.length <= 2 || seen.has(key)) {
+      continue;
+    }
+
+    const lemma = normalizeLemma(key);
+    const localLevel = lookupLocalCefrLevel(key, lemma);
+    const knownLevel = localLevel !== "unknown";
+
+    if (LOW_VALUE_WORD_SET.has(key) || LOW_VALUE_WORD_SET.has(lemma)) {
+      continue;
+    }
+    if (knownLevel && !isCefrAtOrAboveThreshold(localLevel, threshold)) {
+      continue;
+    }
+    if (!knownLevel && (A1_A2_WORD_SET.has(key) || A1_A2_WORD_SET.has(lemma))) {
+      continue;
+    }
+    if (!knownLevel && isLikelyProperNameWord(token)) {
+      continue;
+    }
+
+    seen.add(key);
+    candidates.push({
+      word: token,
+      lemma,
+      cefr: localLevel,
+      source: knownLevel ? "oxford" : "model"
+    });
+    if (candidates.length >= safeLimit) {
+      break;
+    }
+  }
+
+  return candidates;
+}
+
+function applyLocalCefrLevels(entries) {
+  return (Array.isArray(entries) ? entries : []).map((item) => {
+    if (!item || typeof item !== "object") {
+      return item;
+    }
+    const localLevel = lookupLocalCefrLevel(item.word, item.lemma);
+    if (localLevel === "unknown") {
+      return item;
+    }
+    return {
+      ...item,
+      cefr: localLevel
+    };
+  });
+}
+
 function hasText(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -897,7 +1028,7 @@ function normalizePosValue(pos, word) {
 
 function normalizeCefrLevel(value) {
   const cefr = String(value || "").trim().toUpperCase();
-  if (cefr === "B2" || cefr === "C1" || cefr === "C2") {
+  if (cefr === "A1" || cefr === "A2" || cefr === "B1" || cefr === "B2" || cefr === "C1" || cefr === "C2") {
     return cefr;
   }
   return "unknown";
@@ -913,7 +1044,7 @@ function isCefrAtOrAboveThreshold(cefr, wordLevelThreshold = DEFAULT_WORD_LEVEL_
 function getLevelsBelowThreshold(wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD) {
   const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
   const thresholdRank = CEFR_RANK[threshold] || CEFR_RANK[DEFAULT_WORD_LEVEL_THRESHOLD];
-  const allLevels = ["A2", "B1", "B2", "C1", "C2"];
+  const allLevels = ["A1", "A2", "B1", "B2", "C1", "C2"];
   return allLevels.filter((level) => (CEFR_RANK[level] || 0) < thresholdRank);
 }
 
@@ -929,6 +1060,10 @@ function isExcludedWordToken(word, lemma = "") {
     return true;
   }
   if (LOW_VALUE_WORD_SET.has(key) || LOW_VALUE_WORD_SET.has(lemmaKey)) {
+    return true;
+  }
+  const localLevel = lookupLocalCefrLevel(key, lemmaKey);
+  if (localLevel !== "unknown" && !isCefrAtOrAboveThreshold(localLevel, WORD_DISCOVERY_BASE_THRESHOLD)) {
     return true;
   }
   if (A1_A2_WORD_SET.has(key) || A1_A2_WORD_SET.has(lemmaKey)) {
@@ -967,17 +1102,18 @@ Candidate hints (not all are hard enough):
 ${JSON.stringify(candidateHints || [])}
 
 Rules:
-1) Include the most useful words at ${thresholdLabel} that appear in the selected text.
+1) Include only words that appear in candidate hints.
 2) Return at most ${wordLimit} entries.
 3) Do not include words below ${threshold}. (${belowLevels})
-4) Set cefr accurately to one of: B2, C1, C2.
-5) Fill lemma, pos, cefr, definition_simple, example_simple.
-6) definition_simple and example_simple must not be empty.
-7) definition_simple must explain the word in this context in at least 5 words.
-8) example_simple must be a fresh sentence (not a template) with at least 6 words.
-9) Do not output generic lines like "This is a hard word in this text."
-10) Do not include person names, place names, or organization names unless the word is a true difficult vocabulary item.
-11) Do not start definition_simple or example_simple with "In this text".
+4) If a candidate hint has cefr set to B2/C1/C2, keep that cefr exactly.
+5) If a candidate hint has cefr as unknown, estimate cefr as B2/C1/C2.
+6) Fill lemma, pos, cefr, definition_simple, example_simple.
+7) definition_simple and example_simple must not be empty.
+8) definition_simple must explain the word in this context in at least 5 words.
+9) example_simple must be a fresh sentence (not a template) with at least 6 words.
+10) Do not output generic lines like "This is a hard word in this text."
+11) Do not include person names, place names, or organization names unless the word is a true difficult vocabulary item.
+12) Do not start definition_simple or example_simple with "In this text".
 `;
   const response = await requestResponsesApi({
     clientId,

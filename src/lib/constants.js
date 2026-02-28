@@ -1,12 +1,14 @@
 export const SETTINGS_KEY = "easyread_settings_v1";
 export const CACHE_KEY = "easyread_cache_v1";
 export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-export const MODEL_VERSION = "easyread-mvp-2026-26";
+export const MODEL_VERSION = "easyread-mvp-2026-27";
 export const WORD_LEVEL_VALUES = ["B2", "C1", "C2"];
 
 export const DEFAULT_SETTINGS = {
   anonymousClientId: "",
-  wordLevelThreshold: "B2"
+  wordLevelThreshold: "B2",
+  showExplanation: true,
+  showWords: true
 };
 
 export const POS_VALUES = new Set([
@@ -22,6 +24,7 @@ export const POS_VALUES = new Set([
 ]);
 
 export const CEFR_VALUES = new Set([
+  "A1",
   "A2",
   "B1",
   "B2",

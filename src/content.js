@@ -16,8 +16,11 @@
     lastSelectionText: "",
     currentRequestId: "",
     wordsFetchRequestId: "",
+    wordsPending: false,
     explanationMode: "balanced",
     wordLevelThreshold: "B2",
+    showExplanation: true,
+    showWords: true,
     streamedExplanation: "",
     isExplainInFlight: false,
     lastWarmupAt: 0
@@ -47,12 +50,32 @@
       </div>
     </div>
     <div class="easyread-body">
-      <section class="easyread-section">
-        <h3 class="easyread-section-title">Explanation</h3>
-        <div class="easyread-text" data-panel="explanation"></div>
+      <section class="easyread-section easyread-explanation-section">
+        <div class="easyread-section-head">
+          <h3 class="easyread-section-title">Explanation</h3>
+          <button
+            class="easyread-section-toggle"
+            type="button"
+            data-action="toggle-explanation"
+            aria-label="Toggle explanation section"
+          >
+            On
+          </button>
+        </div>
+        <div class="easyread-text easyread-explanation-panel" data-panel="explanation"></div>
       </section>
-      <section class="easyread-section">
-        <h3 class="easyread-section-title">Words</h3>
+      <section class="easyread-section easyread-words-section">
+        <div class="easyread-section-head">
+          <h3 class="easyread-section-title">Words</h3>
+          <button
+            class="easyread-section-toggle"
+            type="button"
+            data-action="toggle-words"
+            aria-label="Toggle words section"
+          >
+            On
+          </button>
+        </div>
         <div class="easyread-word-level-row">
           <div class="easyread-inline-setting easyread-inline-setting-words">
             <select id="easyread-word-level" class="easyread-level-select" aria-label="Word level threshold">
@@ -62,7 +85,7 @@
             </select>
           </div>
         </div>
-        <div data-panel="words"></div>
+        <div class="easyread-words-panel" data-panel="words"></div>
       </section>
     </div>
     <div class="easyread-footer">
@@ -78,17 +101,25 @@
   root.appendChild(overlay);
 
   const statusEl = overlay.querySelector("[data-status]");
+  const explanationSection = overlay.querySelector(".easyread-explanation-section");
+  const wordsSection = overlay.querySelector(".easyread-words-section");
+  const wordsLevelRow = overlay.querySelector(".easyread-word-level-row");
   const explanationPanel = overlay.querySelector('[data-panel="explanation"]');
   const wordsPanel = overlay.querySelector('[data-panel="words"]');
   const pinButton = overlay.querySelector('[data-action="pin"]');
   const modeSimpleButton = overlay.querySelector('[data-action="mode-simple"]');
   const modeDetailedButton = overlay.querySelector('[data-action="mode-detailed"]');
+  const toggleExplanationButton = overlay.querySelector('[data-action="toggle-explanation"]');
+  const toggleWordsButton = overlay.querySelector('[data-action="toggle-words"]');
+  const modeActions = overlay.querySelector(".easyread-mode-actions");
   const wordLevelSelect = overlay.querySelector("#easyread-word-level");
 
   let selectionTimer = null;
 
   explainButton.addEventListener("click", () => runExplain());
   updateModeButtons();
+  updateVisibilityButtons();
+  applySectionVisibility();
   updateWordLevelControl();
   if (wordLevelSelect) {
     wordLevelSelect.addEventListener("change", () => {
@@ -121,6 +152,14 @@
     }
     if (action === "mode-detailed") {
       rerunWithMode("detailed");
+      return;
+    }
+    if (action === "toggle-explanation") {
+      void handleSectionVisibilityToggle("explanation");
+      return;
+    }
+    if (action === "toggle-words") {
+      void handleSectionVisibilityToggle("words");
       return;
     }
   });
@@ -252,15 +291,56 @@
       ? state.lastResult.a2_plus_words
       : [];
     const requestId = createRequestId();
+    const wordsOnlyMode = !state.showExplanation && state.showWords;
     state.currentRequestId = requestId;
-    state.isExplainInFlight = true;
+    state.isExplainInFlight = !wordsOnlyMode;
     showOverlay();
     if (selectedText.length > CHUNK_THRESHOLD_CHARS) {
       showStatus("Large text detected. Creating explanation first...");
     }
-    setLoading(true, requestedMode, isRefine);
+    if (wordsOnlyMode) {
+      state.wordsPending = true;
+      wordsPanel.textContent = "Loading difficult words...";
+      showStatus("Loading words...");
+    } else {
+      setLoading(true, requestedMode, isRefine);
+    }
 
     try {
+      if (wordsOnlyMode) {
+        const response = await sendRuntimeMessage({
+          type: "easyread-fetch-words",
+          payload: {
+            requestId,
+            selectedText,
+            pageUrl: window.location.href,
+            pageOrigin: window.location.origin,
+            explanationMode: requestedMode,
+            baseResult: state.lastResult,
+            wordsOnly: true
+          }
+        });
+        if (!response?.ok) {
+          throw new Error(response?.error || "Failed to load words.");
+        }
+        if (response.data?.requestId && response.data.requestId !== state.currentRequestId) {
+          return;
+        }
+        if (response.data?.wordLevelThreshold) {
+          state.wordLevelThreshold = normalizeWordLevelThreshold(response.data.wordLevelThreshold);
+          updateWordLevelControl();
+        }
+        const wordsResult = response.data?.result;
+        if (!wordsResult || typeof wordsResult !== "object") {
+          throw new Error("No words result returned.");
+        }
+        state.lastResult = wordsResult;
+        state.wordsPending = false;
+        renderWords(wordsResult, false);
+        showStatus("Ready");
+        return;
+      }
+
       const response = await sendRuntimeMessage({
         type: "easyread-explain",
         payload: {
@@ -297,7 +377,8 @@
 
       state.lastResult = nextResult;
       state.streamedExplanation = "";
-      const shouldFetchWords = !isRefine && Boolean(response.data?.wordsPending);
+      state.wordsPending = !isRefine && Boolean(response.data?.wordsPending);
+      const shouldFetchWords = state.showWords && state.wordsPending;
       renderResult(state.lastResult, response.data?.cached, {
         wordsPending: shouldFetchWords,
         explanationMode: requestedMode
@@ -313,7 +394,9 @@
       renderError(error.message || "Failed to explain the selection.");
     } finally {
       state.isExplainInFlight = false;
-      setLoading(false);
+      if (!wordsOnlyMode) {
+        setLoading(false);
+      }
     }
   }
 
@@ -414,7 +497,9 @@
       return;
     }
 
+    const prevExplanation = String(state.lastResult?.simple_explanation || "").trim();
     state.lastResult = result;
+    state.wordsPending = false;
     if (message?.wordLevelThreshold) {
       state.wordLevelThreshold = normalizeWordLevelThreshold(message.wordLevelThreshold);
       updateWordLevelControl();
@@ -423,8 +508,11 @@
       state.explanationMode = normalizeExplanationMode(message.explanationMode);
       updateModeButtons();
     }
-    renderExplanation(result);
     renderWords(result, false);
+    const nextExplanation = String(result?.simple_explanation || "").trim();
+    if (!prevExplanation && nextExplanation) {
+      renderExplanation(result);
+    }
     showStatus("Ready");
   }
 
@@ -499,9 +587,14 @@
         throw new Error("No words result returned.");
       }
 
+      const prevExplanation = String(state.lastResult?.simple_explanation || "").trim();
       state.lastResult = result;
-      renderExplanation(result);
+      state.wordsPending = false;
       renderWords(result, false);
+      const nextExplanation = String(result?.simple_explanation || "").trim();
+      if (!prevExplanation && nextExplanation) {
+        renderExplanation(result);
+      }
       showStatus("Ready");
     } catch (error) {
       if (current !== state.currentRequestId) {
@@ -511,6 +604,7 @@
         error instanceof Error && error.message
           ? error.message
           : "Words took too long. Please try again.";
+      state.wordsPending = false;
       showStatus("Words failed");
     } finally {
       if (state.wordsFetchRequestId === current) {
@@ -568,12 +662,14 @@
   function formatForCopy(result) {
     const lines = [];
     lines.push("EasyRead");
-    lines.push("");
-    lines.push("Explanation:");
-    lines.push(result.simple_explanation || "");
+    if (state.showExplanation) {
+      lines.push("");
+      lines.push("Explanation:");
+      lines.push(result.simple_explanation || "");
+    }
     const wordItems = getRenderableWords(result.a2_plus_words);
 
-    if (wordItems.length > 0) {
+    if (state.showWords && wordItems.length > 0) {
       lines.push("");
       lines.push(`Words (${formatWordLevelLabel(state.wordLevelThreshold)}):`);
       for (const item of wordItems) {
@@ -607,8 +703,99 @@
         state.wordLevelThreshold = normalizeWordLevelThreshold(threshold);
         updateWordLevelControl();
       }
+      state.showExplanation = normalizeVisibilityValue(response?.data?.showExplanation, state.showExplanation);
+      state.showWords = normalizeVisibilityValue(response?.data?.showWords, state.showWords);
+      ensureAtLeastOneSectionVisible();
+      applySectionVisibility();
+      updateVisibilityButtons();
     } catch (_error) {
       // Keep local defaults if settings load fails.
+    }
+  }
+
+  async function handleSectionVisibilityToggle(section) {
+    if (section === "explanation" && state.showExplanation && !state.showWords) {
+      showStatus("Keep one section on.");
+      return;
+    }
+    if (section === "words" && state.showWords && !state.showExplanation) {
+      showStatus("Keep one section on.");
+      return;
+    }
+
+    const previous = {
+      showExplanation: state.showExplanation,
+      showWords: state.showWords
+    };
+
+    if (section === "explanation") {
+      state.showExplanation = !state.showExplanation;
+    } else if (section === "words") {
+      state.showWords = !state.showWords;
+    } else {
+      return;
+    }
+    ensureAtLeastOneSectionVisible();
+    applySectionVisibility();
+    updateVisibilityButtons();
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: "easyread-update-settings",
+        payload: {
+          showExplanation: state.showExplanation,
+          showWords: state.showWords
+        }
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || "Failed to save setting.");
+      }
+
+      state.showExplanation = normalizeVisibilityValue(response?.data?.showExplanation, state.showExplanation);
+      state.showWords = normalizeVisibilityValue(response?.data?.showWords, state.showWords);
+      ensureAtLeastOneSectionVisible();
+      applySectionVisibility();
+      updateVisibilityButtons();
+
+      const turnedExplanationOn = !previous.showExplanation && state.showExplanation;
+      if (turnedExplanationOn && !state.isExplainInFlight && !hasExplanationContent(state.lastResult)) {
+        const selectedText = (state.lastSelectionText || state.selectedText || getSelectionText()).trim();
+        if (selectedText) {
+          showStatus("Loading explanation...");
+          await runExplain(selectedText, {
+            explanationMode: state.explanationMode,
+            isRefine: true
+          });
+          return;
+        }
+      }
+
+      if (
+        state.showWords &&
+        state.wordsPending &&
+        !state.wordsFetchRequestId &&
+        state.currentRequestId &&
+        state.lastResult &&
+        hasNoRenderableWords(state.lastResult)
+      ) {
+        const selectedText = (state.lastSelectionText || state.selectedText || getSelectionText()).trim();
+        if (selectedText) {
+          wordsPanel.textContent = "Loading difficult words...";
+          showStatus("Loading words...");
+          await fetchWordsForCurrentRequest({
+            requestId: state.currentRequestId,
+            selectedText,
+            explanationMode: state.explanationMode
+          });
+        }
+      }
+    } catch (_error) {
+      state.showExplanation = previous.showExplanation;
+      state.showWords = previous.showWords;
+      ensureAtLeastOneSectionVisible();
+      applySectionVisibility();
+      updateVisibilityButtons();
+      showStatus("Save failed");
     }
   }
 
@@ -638,7 +825,7 @@
       updateWordLevelControl();
 
       const selectedText = (state.lastSelectionText || state.selectedText || getSelectionText()).trim();
-      if (!selectedText || !state.lastResult) {
+      if (!selectedText || !state.lastResult || !state.showWords) {
         showStatus("Saved");
         return;
       }
@@ -715,6 +902,49 @@
     }
   }
 
+  function updateVisibilityButtons() {
+    if (toggleExplanationButton) {
+      toggleExplanationButton.dataset.active = state.showExplanation ? "true" : "false";
+      toggleExplanationButton.textContent = state.showExplanation ? "On" : "Off";
+      toggleExplanationButton.disabled = state.showExplanation && !state.showWords;
+    }
+    if (toggleWordsButton) {
+      toggleWordsButton.dataset.active = state.showWords ? "true" : "false";
+      toggleWordsButton.textContent = state.showWords ? "On" : "Off";
+      toggleWordsButton.disabled = state.showWords && !state.showExplanation;
+    }
+  }
+
+  function ensureAtLeastOneSectionVisible() {
+    if (!state.showExplanation && !state.showWords) {
+      state.showExplanation = true;
+    }
+  }
+
+  function applySectionVisibility() {
+    if (explanationPanel) {
+      explanationPanel.hidden = !state.showExplanation;
+    }
+    if (wordsLevelRow) {
+      wordsLevelRow.hidden = !state.showWords;
+    }
+    if (wordsPanel) {
+      wordsPanel.hidden = !state.showWords;
+    }
+    if (wordLevelSelect) {
+      wordLevelSelect.disabled = !state.showWords;
+    }
+    if (modeActions) {
+      modeActions.hidden = !state.showExplanation;
+    }
+    if (explanationSection) {
+      explanationSection.dataset.sectionVisible = state.showExplanation ? "true" : "false";
+    }
+    if (wordsSection) {
+      wordsSection.dataset.sectionVisible = state.showWords ? "true" : "false";
+    }
+  }
+
   function updateWordLevelControl() {
     if (!wordLevelSelect) {
       return;
@@ -744,6 +974,21 @@
   function formatWordLevelLabel(level) {
     const normalized = normalizeWordLevelThreshold(level);
     return normalized === "C2" ? "C2" : `${normalized}+`;
+  }
+
+  function normalizeVisibilityValue(value, fallback = true) {
+    if (typeof value === "boolean") {
+      return value;
+    }
+    return Boolean(fallback);
+  }
+
+  function hasNoRenderableWords(result) {
+    return getRenderableWords(result?.a2_plus_words).length === 0;
+  }
+
+  function hasExplanationContent(result) {
+    return typeof result?.simple_explanation === "string" && result.simple_explanation.trim().length > 0;
   }
 
   function getModeLabel(mode) {
