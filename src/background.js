@@ -36,7 +36,7 @@ const CEFR_RANK = {
   C2: 5,
   unknown: 0
 };
-const MAX_A2_CANDIDATES = 28;
+const MAX_A2_CANDIDATES = 40;
 const MAX_OUTPUT_TOKENS = 2600;
 const HARD_MAX_CHARS = 20000;
 const WORD_FETCH_TIMEOUT_MS = 20000;
@@ -493,6 +493,10 @@ async function handleFetchWordsRequest(payload, _sender) {
     words = [];
   }
 
+  if (!Array.isArray(words) || words.length === 0) {
+    words = buildFallbackWordEntriesFromCandidates(candidates, wordLimit, discoveryThreshold);
+  }
+
   const finalWordItems = normalizeAndCompleteWordEntries(
     applyLocalCefrLevels(words),
     wordLimit,
@@ -836,12 +840,12 @@ function extractWordCandidates(
   const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
   const safeLimit = Math.max(1, Number(maxCount) || MAX_A2_CANDIDATES);
   const tokens = String(selectedText || "").match(TOKEN_REGEX) || [];
-  const seen = new Set();
-  const candidates = [];
+  const candidatesByKey = new Map();
 
-  for (const token of tokens) {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
     const key = normalizeWordKey(token);
-    if (!key || key.length <= 2 || seen.has(key)) {
+    if (!key || key.length <= 2) {
       continue;
     }
 
@@ -862,19 +866,52 @@ function extractWordCandidates(
       continue;
     }
 
-    seen.add(key);
-    candidates.push({
-      word: token,
-      lemma,
-      cefr: localLevel,
-      source: knownLevel ? "oxford" : "model"
-    });
-    if (candidates.length >= safeLimit) {
-      break;
+    const rank = CEFR_RANK[localLevel] || 0;
+    const existing = candidatesByKey.get(key);
+    if (!existing) {
+      candidatesByKey.set(key, {
+        word: token,
+        lemma,
+        cefr: localLevel,
+        source: knownLevel ? "oxford" : "model",
+        knownLevel,
+        rank,
+        index
+      });
+      continue;
+    }
+
+    // Keep stronger CEFR signal or earlier occurrence when score is equal.
+    if (rank > existing.rank || (rank === existing.rank && index < existing.index)) {
+      candidatesByKey.set(key, {
+        word: token,
+        lemma,
+        cefr: localLevel,
+        source: knownLevel ? "oxford" : "model",
+        knownLevel,
+        rank,
+        index
+      });
     }
   }
 
-  return candidates;
+  return [...candidatesByKey.values()]
+    .sort((a, b) => {
+      if (a.knownLevel !== b.knownLevel) {
+        return a.knownLevel ? -1 : 1;
+      }
+      if (a.rank !== b.rank) {
+        return b.rank - a.rank;
+      }
+      return a.index - b.index;
+    })
+    .slice(0, safeLimit)
+    .map(({ word, lemma, cefr, source }) => ({
+      word,
+      lemma,
+      cefr,
+      source
+    }));
 }
 
 function applyLocalCefrLevels(entries) {
@@ -891,6 +928,84 @@ function applyLocalCefrLevels(entries) {
       cefr: localLevel
     };
   });
+}
+
+function buildFallbackDefinition(word, pos = "other") {
+  if (pos === "verb") {
+    return "To do an action in a formal or careful way.";
+  }
+  if (pos === "noun") {
+    return "A formal word for a thing, person, or idea.";
+  }
+  if (pos === "adj") {
+    return "Used to describe something in formal English.";
+  }
+  if (pos === "adv") {
+    return "Used to describe how an action happens.";
+  }
+  return `A higher-level English word: "${word}".`;
+}
+
+function buildFallbackExample(word, pos = "other", lemma = "") {
+  if (pos === "verb") {
+    const action = normalizeWordKey(lemma || word) || "act";
+    return `Leaders ${action} with care during hard talks.`;
+  }
+  if (pos === "noun") {
+    return `The report used "${word}" to explain the main idea.`;
+  }
+  if (pos === "adj") {
+    return `This is a "${word}" plan for a hard problem.`;
+  }
+  if (pos === "adv") {
+    return `She spoke "${word}" during the meeting.`;
+  }
+  return `People use "${word}" in formal English writing.`;
+}
+
+function buildFallbackWordEntriesFromCandidates(
+  candidates,
+  wordLimit = 12,
+  wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD
+) {
+  const safeLimit = Math.max(1, Math.min(Number(wordLimit) || 12, 16));
+  const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
+  const seen = new Set();
+  const result = [];
+
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const word = String(candidate?.word || "").trim();
+    if (!word) {
+      continue;
+    }
+    const key = normalizeWordKey(word);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    const lemma = normalizeLemma(candidate?.lemma || word);
+    const cefr = normalizeCefrLevel(candidate?.cefr);
+    if (!isCefrAtOrAboveThreshold(cefr, threshold)) {
+      continue;
+    }
+    if (isExcludedWordToken(word, lemma)) {
+      continue;
+    }
+    const pos = normalizePosValue(candidate?.pos, word);
+    seen.add(key);
+    result.push({
+      word,
+      lemma,
+      pos,
+      cefr,
+      definition_simple: buildFallbackDefinition(word, pos),
+      example_simple: buildFallbackExample(word, pos, lemma)
+    });
+    if (result.length >= safeLimit) {
+      break;
+    }
+  }
+
+  return result;
 }
 
 function hasText(value) {
@@ -950,8 +1065,12 @@ function normalizeWordEntriesWithFallback(
     }
     const pos = normalizePosValue(item?.pos, word);
     const cefr = normalizeCefrLevel(item?.cefr);
-    const definition = hasText(item?.definition_simple) ? String(item.definition_simple).trim() : "";
-    const example = hasText(item?.example_simple) ? String(item.example_simple).trim() : "";
+    const definition = hasText(item?.definition_simple)
+      ? String(item.definition_simple).trim()
+      : buildFallbackDefinition(word, pos);
+    const example = hasText(item?.example_simple)
+      ? String(item.example_simple).trim()
+      : buildFallbackExample(word, pos, lemma);
 
     result.push({
       word,
@@ -1086,6 +1205,11 @@ async function callModelForB2PlusWords({
   const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
   const thresholdLabel = formatWordLevelLabel(threshold);
   const belowLevels = getLevelsBelowThreshold(threshold).join(", ");
+  const requiredWords = (candidateHints || [])
+    .filter((item) => isCefrAtOrAboveThreshold(item?.cefr, threshold))
+    .slice(0, 8)
+    .map((item) => String(item.word || "").trim())
+    .filter(Boolean);
   const systemPrompt = `
 You extract difficult words and explain them for learners.
 Return JSON only.
@@ -1101,19 +1225,23 @@ Selected text:
 Candidate hints (not all are hard enough):
 ${JSON.stringify(candidateHints || [])}
 
+Required words to include if present:
+${JSON.stringify(requiredWords)}
+
 Rules:
 1) Include only words that appear in candidate hints.
-2) Return at most ${wordLimit} entries.
-3) Do not include words below ${threshold}. (${belowLevels})
-4) If a candidate hint has cefr set to B2/C1/C2, keep that cefr exactly.
-5) If a candidate hint has cefr as unknown, estimate cefr as B2/C1/C2.
-6) Fill lemma, pos, cefr, definition_simple, example_simple.
-7) definition_simple and example_simple must not be empty.
-8) definition_simple must explain the word in this context in at least 5 words.
-9) example_simple must be a fresh sentence (not a template) with at least 6 words.
-10) Do not output generic lines like "This is a hard word in this text."
-11) Do not include person names, place names, or organization names unless the word is a true difficult vocabulary item.
-12) Do not start definition_simple or example_simple with "In this text".
+2) Include all required words when they exist in selected text.
+3) Return at most ${wordLimit} entries.
+4) Do not include words below ${threshold}. (${belowLevels})
+5) If a candidate hint has cefr set to B2/C1/C2, keep that cefr exactly.
+6) If a candidate hint has cefr as unknown, estimate cefr as B2/C1/C2.
+7) Fill lemma, pos, cefr, definition_simple, example_simple.
+8) definition_simple and example_simple must not be empty.
+9) definition_simple must explain the word in this context in at least 5 words.
+10) example_simple must be a fresh sentence (not a template) with at least 6 words.
+11) Do not output generic lines like "This is a hard word in this text."
+12) Do not include person names, place names, or organization names unless the word is a true difficult vocabulary item.
+13) Do not start definition_simple or example_simple with "In this text".
 `;
   const response = await requestResponsesApi({
     clientId,
