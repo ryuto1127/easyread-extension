@@ -7,6 +7,15 @@
   const HARD_MAX_CHARS = 12000;
   const CHUNK_THRESHOLD_CHARS = 4500;
   const WARMUP_COOLDOWN_MS = 45_000;
+  const CEFR_RANK = {
+    A1: 0,
+    A2: 1,
+    B1: 2,
+    B2: 3,
+    C1: 4,
+    C2: 5,
+    unknown: 0
+  };
 
   const state = {
     selectedText: "",
@@ -434,7 +443,7 @@
   function renderWords(result, isPending = false) {
     clearNode(wordsPanel);
 
-    const wordItems = getRenderableWords(result?.a2_plus_words);
+    const wordItems = getRenderableWords(result?.a2_plus_words, state.wordLevelThreshold);
     if (wordItems.length > 0) {
       for (const item of wordItems) {
         const card = document.createElement("article");
@@ -464,18 +473,33 @@
       return;
     }
 
+    if (result?.words_status === "definitions_unavailable") {
+      const detectedWords = Array.isArray(result?.detected_words)
+        ? result.detected_words
+            .map((word) => String(word || "").trim())
+            .filter(Boolean)
+            .slice(0, 8)
+        : [];
+      const detectedSuffix = detectedWords.length > 0 ? ` Detected: ${detectedWords.join(", ")}.` : "";
+      const reasonSuffix = result?.words_error ? ` Reason: ${formatWordsErrorReason(result.words_error)}.` : "";
+      wordsPanel.textContent = `Words were found, but definitions could not load. Please click Explain again.${reasonSuffix}${detectedSuffix}`;
+      return;
+    }
+
     wordsPanel.textContent = isPending
       ? "Loading difficult words..."
       : `No ${formatWordLevelLabel(state.wordLevelThreshold)} words found.`;
   }
 
-  function getRenderableWords(words) {
+  function getRenderableWords(words, wordLevelThreshold = state.wordLevelThreshold) {
+    const minLevel = normalizeWordLevelThreshold(wordLevelThreshold);
     return (Array.isArray(words) ? words : []).filter(
       (item) =>
         typeof item?.definition_simple === "string" &&
         item.definition_simple.trim() &&
         typeof item?.example_simple === "string" &&
-        item.example_simple.trim()
+        item.example_simple.trim() &&
+        isCefrAtOrAboveThreshold(item?.cefr, minLevel)
     );
   }
 
@@ -531,7 +555,7 @@
       const partial = state.streamedExplanation.trim();
       if (partial) {
         explanationPanel.textContent = partial;
-        const hasWords = getRenderableWords(state.lastResult?.a2_plus_words).length > 0;
+        const hasWords = getRenderableWords(state.lastResult?.a2_plus_words, state.wordLevelThreshold).length > 0;
         if (!hasWords) {
           wordsPanel.textContent = "Loading difficult words...";
         }
@@ -617,7 +641,8 @@
     if (isLoading) {
       showStatus(isRefine ? "Updating..." : "Working...");
       explanationPanel.innerHTML = '<div class="easyread-loading">Creating explanation</div>';
-      const hasExistingWords = getRenderableWords(state.lastResult?.a2_plus_words).length > 0;
+      const hasExistingWords =
+        getRenderableWords(state.lastResult?.a2_plus_words, state.wordLevelThreshold).length > 0;
       if (!isRefine || !hasExistingWords) {
         wordsPanel.textContent = "";
       }
@@ -667,7 +692,7 @@
       lines.push("Explanation:");
       lines.push(result.simple_explanation || "");
     }
-    const wordItems = getRenderableWords(result.a2_plus_words);
+    const wordItems = getRenderableWords(result.a2_plus_words, state.wordLevelThreshold);
 
     if (state.showWords && wordItems.length > 0) {
       lines.push("");
@@ -776,7 +801,7 @@
         !state.wordsFetchRequestId &&
         state.currentRequestId &&
         state.lastResult &&
-        hasNoRenderableWords(state.lastResult)
+        hasNoRenderableWords(state.lastResult, "B2")
       ) {
         const selectedText = (state.lastSelectionText || state.selectedText || getSelectionText()).trim();
         if (selectedText) {
@@ -832,13 +857,33 @@
 
       const requestId = state.currentRequestId || createRequestId();
       state.currentRequestId = requestId;
-      wordsPanel.textContent = "Loading difficult words...";
-      showStatus("Updating words...");
-      await fetchWordsForCurrentRequest({
-        requestId,
-        selectedText,
-        explanationMode: state.explanationMode
+      showStatus("Applying level...");
+      const refilterResponse = await sendRuntimeMessage({
+        type: "easyread-refilter-words",
+        payload: {
+          requestId,
+          selectedText,
+          pageUrl: window.location.href,
+          pageOrigin: window.location.origin,
+          explanationMode: state.explanationMode,
+          baseResult: state.lastResult
+        }
       });
+      if (!refilterResponse?.ok) {
+        throw new Error(refilterResponse?.error || "Failed to apply word level.");
+      }
+      if (refilterResponse.data?.requestId && refilterResponse.data.requestId !== state.currentRequestId) {
+        return;
+      }
+      if (refilterResponse.data?.wordLevelThreshold) {
+        state.wordLevelThreshold = normalizeWordLevelThreshold(refilterResponse.data.wordLevelThreshold);
+        updateWordLevelControl();
+      }
+      if (refilterResponse.data?.result && typeof refilterResponse.data.result === "object") {
+        state.lastResult = refilterResponse.data.result;
+      }
+      renderWords(state.lastResult, false);
+      showStatus("Ready");
     } catch (_error) {
       state.wordLevelThreshold = previous;
       updateWordLevelControl();
@@ -976,6 +1021,20 @@
     return normalized === "C2" ? "C2" : `${normalized}+`;
   }
 
+  function normalizeCefrLevel(value) {
+    const level = typeof value === "string" ? value.trim().toUpperCase() : "";
+    if (level === "A1" || level === "A2" || level === "B1" || level === "B2" || level === "C1" || level === "C2") {
+      return level;
+    }
+    return "unknown";
+  }
+
+  function isCefrAtOrAboveThreshold(cefr, wordLevelThreshold = "B2") {
+    const currentRank = CEFR_RANK[normalizeCefrLevel(cefr)] || 0;
+    const minRank = CEFR_RANK[normalizeWordLevelThreshold(wordLevelThreshold)] || CEFR_RANK.B2;
+    return currentRank >= minRank;
+  }
+
   function normalizeVisibilityValue(value, fallback = true) {
     if (typeof value === "boolean") {
       return value;
@@ -983,8 +1042,46 @@
     return Boolean(fallback);
   }
 
-  function hasNoRenderableWords(result) {
-    return getRenderableWords(result?.a2_plus_words).length === 0;
+  function formatWordsErrorReason(code) {
+    const value = String(code || "").trim().toUpperCase();
+    if (value === "RATE_LIMIT") {
+      return "Rate limit reached";
+    }
+    if (value === "EXTENSION_NOT_ALLOWED") {
+      return "Extension ID not allowed";
+    }
+    if (value === "REQUEST_INVALID") {
+      return "Request rejected by server";
+    }
+    if (value === "SERVER_TEMPORARY") {
+      return "Server temporary error";
+    }
+    if (value === "NETWORK") {
+      return "Network error";
+    }
+    if (value === "TIMEOUT") {
+      return "Word request timed out";
+    }
+    if (value === "OUTPUT_CUTOFF") {
+      return "Word response was cut off";
+    }
+    if (value === "INCOMPLETE") {
+      return "Word response incomplete";
+    }
+    if (value === "MODEL_FAILED") {
+      return "Model failed for word request";
+    }
+    if (value === "EMPTY_MODEL_OUTPUT") {
+      return "Model returned no word entries";
+    }
+    if (value === "PROXY_ERROR") {
+      return "Proxy error";
+    }
+    return "Unknown error";
+  }
+
+  function hasNoRenderableWords(result, wordLevelThreshold = state.wordLevelThreshold) {
+    return getRenderableWords(result?.a2_plus_words, wordLevelThreshold).length === 0;
   }
 
   function hasExplanationContent(result) {

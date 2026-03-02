@@ -1,7 +1,11 @@
 export const SETTINGS_KEY = "easyread_settings_v1";
 export const CACHE_KEY = "easyread_cache_v1";
+export const WORD_DEFINITION_CACHE_KEY = "easyread_word_definition_cache_v1";
+export const WORD_CEFR_CACHE_KEY = "easyread_word_cefr_cache_v1";
 export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-export const MODEL_VERSION = "easyread-mvp-2026-29";
+export const WORD_DEFINITION_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const WORD_CEFR_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const MODEL_VERSION = "easyread-mvp-2026-38";
 export const WORD_LEVEL_VALUES = ["B2", "C1", "C2"];
 
 export const DEFAULT_SETTINGS = {

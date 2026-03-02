@@ -144,6 +144,16 @@ export function parseAndNormalizeResponse(rawText) {
 export function parseAndNormalizeWordCoverage(rawText) {
   const parsed = tryParseJsonFlexible(rawText);
 
+  const toWordArray = (value) => {
+    if (Array.isArray(value)) {
+      return normalizeWordEntries(value);
+    }
+    if (value && typeof value === "object") {
+      return normalizeWordEntries([value]);
+    }
+    return [];
+  };
+
   if (Array.isArray(parsed)) {
     return normalizeWordEntries(parsed);
   }
@@ -159,8 +169,9 @@ export function parseAndNormalizeWordCoverage(rawText) {
     parsed.items
   ];
   for (const value of candidates) {
-    if (Array.isArray(value)) {
-      return normalizeWordEntries(value);
+    const normalized = toWordArray(value);
+    if (normalized.length > 0) {
+      return normalized;
     }
   }
 

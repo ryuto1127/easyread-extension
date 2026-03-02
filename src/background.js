@@ -4,13 +4,22 @@ import { EASYREAD_JSON_SCHEMA, MODEL_VERSION, WORD_LEVEL_VALUES } from "./lib/co
 import {
   parseAndNormalizeWordCoverage,
   extractOutputText,
-  isOutputUsable
+  isOutputUsable,
+  normalizeWordEntries
 } from "./lib/schema.js";
 import {
+  buildWordCefrCacheKey,
+  buildWordDefinitionCacheKey,
   clearCache,
   getCachedResponse,
   getSettings,
+  getWordCefrCacheMap,
+  getWordDefinitionCacheMap,
   pruneExpiredCacheEntries,
+  pruneExpiredWordCefrEntries,
+  pruneExpiredWordDefinitionEntries,
+  saveWordCefrDecisions,
+  saveWordDefinitions,
   saveCachedResponse,
   saveSettings
 } from "./lib/storage.js";
@@ -39,8 +48,7 @@ const CEFR_RANK = {
 const MAX_A2_CANDIDATES = 40;
 const MAX_OUTPUT_TOKENS = 2600;
 const HARD_MAX_CHARS = 20000;
-const WORD_FETCH_TIMEOUT_MS = 20000;
-const WORD_MAX_OUTPUT_TOKENS = 1800;
+const WORD_FETCH_TIMEOUT_MS = 12000;
 const WARMUP_COOLDOWN_MS = 45_000;
 const POS_VALUE_SET = new Set(["noun", "verb", "adj", "adv", "prep", "pron", "det", "conj", "other"]);
 const LOW_VALUE_WORD_SET = new Set([
@@ -86,14 +94,6 @@ const LOW_VALUE_WORD_SET = new Set([
   "soldier",
   "soldiers"
 ]);
-const WORD_COVERAGE_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["a2_plus_words"],
-  properties: {
-    a2_plus_words: EASYREAD_JSON_SCHEMA.properties.a2_plus_words
-  }
-};
 const EASY_WORD_REPLACEMENTS = {
   "small details": "small things",
   "daily life": "everyday life",
@@ -140,11 +140,15 @@ let lastProxyWarmupAt = 0;
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureSettings();
   await pruneExpiredCacheEntries();
+  await pruneExpiredWordDefinitionEntries();
+  await pruneExpiredWordCefrEntries();
   await createContextMenu();
   void warmProxyConnection(true);
 });
 
 chrome.runtime.onStartup.addListener(async () => {
+  await pruneExpiredWordDefinitionEntries();
+  await pruneExpiredWordCefrEntries();
   await createContextMenu();
   void warmProxyConnection(true);
 });
@@ -170,6 +174,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "easyread-fetch-words") {
     handleFetchWordsRequest(message.payload || {}, sender)
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: toUserErrorMessage(error) }));
+    return true;
+  }
+
+  if (message?.type === "easyread-refilter-words") {
+    handleRefilterWordsRequest(message.payload || {})
       .then((data) => sendResponse({ ok: true, data }))
       .catch((error) => sendResponse({ ok: false, error: toUserErrorMessage(error) }));
     return true;
@@ -444,12 +455,16 @@ async function handleFetchWordsRequest(payload, _sender) {
     throw new EasyReadError("Base explanation is missing. Please click Explain again.", "MISSING_BASE_RESULT");
   }
 
-  const candidates = extractWordCandidates(selectedText, discoveryThreshold, MAX_A2_CANDIDATES);
+  let candidates = extractWordCandidates(selectedText, discoveryThreshold, MAX_A2_CANDIDATES);
+  if (candidates.length === 0) {
+    candidates = extractDatasetWordCandidates(selectedText, discoveryThreshold, MAX_A2_CANDIDATES);
+  }
   if (candidates.length === 0) {
     const noWordsResult = enforceEasyLanguage(
       {
         ...baseResult,
         a2_plus_words: [],
+        detected_words: [],
         notes: baseResult.notes || ""
       },
       selectedText
@@ -476,9 +491,11 @@ async function handleFetchWordsRequest(payload, _sender) {
   }
 
   const wordLimit = getWordResultLimit(selectedText.length, discoveryThreshold);
-  let words = [];
+  const wordTimeoutMs = getWordFetchTimeoutMs(candidates.length, wordLimit);
+  let modelWords = [];
+  let wordsError = "";
   try {
-    words = await withTimeout(
+    modelWords = await withTimeout(
       callModelForB2PlusWords({
         clientId,
         model: selectedModel,
@@ -487,27 +504,43 @@ async function handleFetchWordsRequest(payload, _sender) {
         wordLimit,
         wordLevelThreshold: discoveryThreshold
       }),
-      WORD_FETCH_TIMEOUT_MS
+      wordTimeoutMs
     );
-  } catch (_error) {
-    words = [];
+  } catch (error) {
+    modelWords = [];
+    wordsError = normalizeWordsErrorMessage(error);
   }
-
-  if (!Array.isArray(words) || words.length === 0) {
-    words = buildFallbackWordEntriesFromCandidates(candidates, wordLimit, discoveryThreshold);
+  if (!wordsError && (!Array.isArray(modelWords) || modelWords.length === 0) && candidates.length > 0) {
+    wordsError = "EMPTY_MODEL_OUTPUT";
   }
-
-  const finalWordItems = normalizeAndCompleteWordEntries(
-    applyLocalCefrLevels(words),
+  const [definitionCacheMap, cefrCacheMap] = await Promise.all([
+    getWordDefinitionCacheMap(),
+    getWordCefrCacheMap()
+  ]);
+  const wordEntries = buildWordEntriesFromCandidates({
+    candidates,
+    modelEntries: applyLocalCefrLevels(modelWords),
+    definitionCacheMap,
+    cefrCacheMap,
     wordLimit,
-    discoveryThreshold
-  );
+    wordLevelThreshold: discoveryThreshold
+  });
+  const finalWordItems = normalizeAndCompleteWordEntries(wordEntries, wordLimit, discoveryThreshold);
+  if (finalWordItems.length > 0) {
+    await Promise.all([saveWordDefinitions(finalWordItems), saveWordCefrDecisions(finalWordItems)]);
+  }
 
+  const wordsUnavailable = candidates.length > 0 && finalWordItems.length === 0;
   const finalResult = enforceEasyLanguage(
     {
       ...baseResult,
       a2_plus_words: finalWordItems,
-      notes: baseResult.notes || ""
+      detected_words: candidates.map((item) => String(item?.word || "").trim()).filter(Boolean),
+      notes: wordsUnavailable
+        ? appendNote(baseResult.notes || "", "Words were found, but definitions could not load. Please click Explain again.")
+        : baseResult.notes || "",
+      words_status: wordsUnavailable ? "definitions_unavailable" : "ready",
+      words_error: wordsError
     },
     selectedText
   );
@@ -527,6 +560,55 @@ async function handleFetchWordsRequest(payload, _sender) {
   return {
     cached: false,
     result: displayResult,
+    requestId,
+    wordsPending: false,
+    explanationMode,
+    wordLevelThreshold
+  };
+}
+
+async function handleRefilterWordsRequest(payload) {
+  const settings = await getSettings();
+  const selectedText = normalizeSelection(payload.selectedText);
+  const requestId = normalizeRequestId(payload.requestId);
+  const explanationMode = normalizeExplanationMode(payload.explanationMode);
+  const wordLevelThreshold = normalizeWordLevelThreshold(settings.wordLevelThreshold);
+  const discoveryThreshold = WORD_DISCOVERY_BASE_THRESHOLD;
+
+  let sourceResult =
+    payload?.baseResult && typeof payload.baseResult === "object"
+      ? normalizeResultShape(payload.baseResult)
+      : null;
+
+  if (selectedText) {
+    const pageOrigin = getPageOrigin(payload.pageUrl, payload.pageOrigin);
+    const cacheKey = await buildCacheKey({
+      pageOrigin,
+      selectedText,
+      explanationMode,
+      wordLevelThreshold: discoveryThreshold,
+      model: EXPLAIN_MODEL,
+      modelVersion: MODEL_VERSION
+    });
+    const cached = await getCachedResponse(cacheKey);
+    if (cached && typeof cached === "object") {
+      sourceResult = normalizeResultShape(cached);
+    }
+  }
+
+  const safeSource = normalizeResultShape(
+    sourceResult || {
+      simple_explanation: "",
+      a2_plus_words: [],
+      notes: "",
+      confidence: 0.5
+    }
+  );
+  const filtered = filterResultByWordLevel(safeSource, wordLevelThreshold);
+
+  return {
+    cached: true,
+    result: filtered,
     requestId,
     wordsPending: false,
     explanationMode,
@@ -596,10 +678,23 @@ function normalizeResultShape(result) {
   if (!Array.isArray(base.a2_plus_words)) {
     base.a2_plus_words = [];
   }
+  if (!Array.isArray(base.detected_words)) {
+    base.detected_words = [];
+  } else {
+    base.detected_words = base.detected_words
+      .map((word) => String(word || "").trim())
+      .filter(Boolean);
+  }
   if (typeof base.simple_explanation !== "string") {
     base.simple_explanation = "";
   } else {
     base.simple_explanation = base.simple_explanation.trim();
+  }
+  if (typeof base.words_status !== "string") {
+    base.words_status = "";
+  }
+  if (typeof base.words_error !== "string") {
+    base.words_error = "";
   }
   if (typeof base.notes !== "string") {
     base.notes = "";
@@ -792,6 +887,20 @@ function getWordResultLimit(selectionLength, wordLevelThreshold = DEFAULT_WORD_L
   return threshold === "C2" ? 8 : threshold === "C1" ? 9 : 10;
 }
 
+function getWordFetchTimeoutMs(candidateCount, wordLimit) {
+  const count = Math.max(1, Number(candidateCount) || 1);
+  const limit = Math.max(1, Number(wordLimit) || 1);
+  const dynamic = 14000 + count * 1500 + limit * 500;
+  return Math.max(22000, Math.min(45000, dynamic));
+}
+
+function getWordOutputTokenBudget(wordLimit, snippetLength = 0) {
+  const limit = Math.max(1, Number(wordLimit) || 1);
+  const snippet = Math.max(0, Number(snippetLength) || 0);
+  const dynamic = 900 + limit * 170 + Math.min(220, Math.floor(snippet * 0.2));
+  return Math.max(950, Math.min(1800, dynamic));
+}
+
 function getExplanationOnlyTokenBudget(selectionLength, explanationMode = DEFAULT_EXPLANATION_MODE) {
   const mode = normalizeExplanationMode(explanationMode);
   let budget;
@@ -848,6 +957,9 @@ function extractWordCandidates(
     if (!key || key.length <= 2) {
       continue;
     }
+    if (isLikelyNameChainToken(tokens, index)) {
+      continue;
+    }
 
     const lemma = normalizeLemma(key);
     const localLevel = lookupLocalCefrLevel(key, lemma);
@@ -856,23 +968,26 @@ function extractWordCandidates(
     if (LOW_VALUE_WORD_SET.has(key) || LOW_VALUE_WORD_SET.has(lemma)) {
       continue;
     }
-    if (knownLevel && !isCefrAtOrAboveThreshold(localLevel, threshold)) {
-      continue;
-    }
-    if (!knownLevel && (A1_A2_WORD_SET.has(key) || A1_A2_WORD_SET.has(lemma))) {
-      continue;
-    }
-    if (!knownLevel && isLikelyProperNameWord(token)) {
-      continue;
+    if (knownLevel) {
+      if (!isCefrAtOrAboveThreshold(localLevel, threshold)) {
+        continue;
+      }
+    } else {
+      if (A1_A2_WORD_SET.has(key) || A1_A2_WORD_SET.has(lemma)) {
+        continue;
+      }
+      if (isLikelyProperNameWord(token)) {
+        continue;
+      }
     }
 
-    const rank = CEFR_RANK[localLevel] || 0;
+    const rank = knownLevel ? CEFR_RANK[localLevel] || 0 : 0;
     const existing = candidatesByKey.get(key);
     if (!existing) {
       candidatesByKey.set(key, {
         word: token,
         lemma,
-        cefr: localLevel,
+        cefr: knownLevel ? localLevel : "unknown",
         source: knownLevel ? "oxford" : "model",
         knownLevel,
         rank,
@@ -886,7 +1001,7 @@ function extractWordCandidates(
       candidatesByKey.set(key, {
         word: token,
         lemma,
-        cefr: localLevel,
+        cefr: knownLevel ? localLevel : "unknown",
         source: knownLevel ? "oxford" : "model",
         knownLevel,
         rank,
@@ -914,6 +1029,59 @@ function extractWordCandidates(
     }));
 }
 
+function extractDatasetWordCandidates(
+  selectedText,
+  wordLevelThreshold = WORD_DISCOVERY_BASE_THRESHOLD,
+  maxCount = MAX_A2_CANDIDATES
+) {
+  const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
+  const safeLimit = Math.max(1, Number(maxCount) || MAX_A2_CANDIDATES);
+  const tokens = String(selectedText || "").match(TOKEN_REGEX) || [];
+  const candidatesByKey = new Map();
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    const key = normalizeWordKey(token);
+    if (!key || key.length <= 2) {
+      continue;
+    }
+    if (isLikelyNameChainToken(tokens, index)) {
+      continue;
+    }
+    const lemma = normalizeLemma(key);
+    const localLevel = lookupLocalCefrLevel(key, lemma);
+    if (localLevel === "unknown" || !isCefrAtOrAboveThreshold(localLevel, threshold)) {
+      continue;
+    }
+    if (LOW_VALUE_WORD_SET.has(key) || LOW_VALUE_WORD_SET.has(lemma)) {
+      continue;
+    }
+    if (isLikelyProperNameWord(token)) {
+      continue;
+    }
+    if (!candidatesByKey.has(key)) {
+      candidatesByKey.set(key, {
+        word: token,
+        lemma,
+        cefr: localLevel,
+        source: "oxford",
+        rank: CEFR_RANK[localLevel] || 0,
+        index
+      });
+    }
+  }
+
+  return [...candidatesByKey.values()]
+    .sort((a, b) => (b.rank - a.rank) || (a.index - b.index))
+    .slice(0, safeLimit)
+    .map(({ word, lemma, cefr, source }) => ({
+      word,
+      lemma,
+      cefr,
+      source
+    }));
+}
+
 function applyLocalCefrLevels(entries) {
   return (Array.isArray(entries) ? entries : []).map((item) => {
     if (!item || typeof item !== "object") {
@@ -930,46 +1098,33 @@ function applyLocalCefrLevels(entries) {
   });
 }
 
-function buildFallbackDefinition(word, pos = "other") {
-  if (pos === "verb") {
-    return "To do an action in a formal or careful way.";
-  }
-  if (pos === "noun") {
-    return "A formal word for a thing, person, or idea.";
-  }
-  if (pos === "adj") {
-    return "Used to describe something in formal English.";
-  }
-  if (pos === "adv") {
-    return "Used to describe how an action happens.";
-  }
-  return `A higher-level English word: "${word}".`;
-}
-
-function buildFallbackExample(word, pos = "other", lemma = "") {
-  if (pos === "verb") {
-    const action = normalizeWordKey(lemma || word) || "act";
-    return `Leaders ${action} with care during hard talks.`;
-  }
-  if (pos === "noun") {
-    return `The report used "${word}" to explain the main idea.`;
-  }
-  if (pos === "adj") {
-    return `This is a "${word}" plan for a hard problem.`;
-  }
-  if (pos === "adv") {
-    return `She spoke "${word}" during the meeting.`;
-  }
-  return `People use "${word}" in formal English writing.`;
-}
-
-function buildFallbackWordEntriesFromCandidates(
+function buildWordEntriesFromCandidates({
   candidates,
+  modelEntries,
+  definitionCacheMap,
+  cefrCacheMap,
   wordLimit = 12,
   wordLevelThreshold = DEFAULT_WORD_LEVEL_THRESHOLD
-) {
+}) {
   const safeLimit = Math.max(1, Math.min(Number(wordLimit) || 12, 16));
   const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
+  const normalizedModelEntries = Array.isArray(modelEntries) ? modelEntries : [];
+  const cacheMap = definitionCacheMap && typeof definitionCacheMap === "object" ? definitionCacheMap : {};
+  const levelCacheMap = cefrCacheMap && typeof cefrCacheMap === "object" ? cefrCacheMap : {};
+
+  const modelByWord = new Map();
+  const modelByLemma = new Map();
+  for (const entry of normalizedModelEntries) {
+    const wordKey = normalizeWordKey(entry?.word || "");
+    const lemmaKey = normalizeWordKey(entry?.lemma || "");
+    if (wordKey && !modelByWord.has(wordKey)) {
+      modelByWord.set(wordKey, entry);
+    }
+    if (lemmaKey && !modelByLemma.has(lemmaKey)) {
+      modelByLemma.set(lemmaKey, entry);
+    }
+  }
+
   const seen = new Set();
   const result = [];
 
@@ -982,23 +1137,54 @@ function buildFallbackWordEntriesFromCandidates(
     if (!key || seen.has(key)) {
       continue;
     }
+
     const lemma = normalizeLemma(candidate?.lemma || word);
-    const cefr = normalizeCefrLevel(candidate?.cefr);
+    const modelEntry = modelByWord.get(key) || modelByLemma.get(lemma) || null;
+    const datasetCefr = normalizeCefrLevel(lookupLocalCefrLevel(word, lemma));
+    const modelCefr = normalizeCefrLevel(modelEntry?.cefr);
+    const cachedCefrKey = buildWordCefrCacheKey(lemma || word);
+    const cachedCefr = normalizeCefrLevel(levelCacheMap[cachedCefrKey]?.cefr || "");
+    const candidateCefr = normalizeCefrLevel(candidate?.cefr);
+    const cefr =
+      datasetCefr !== "unknown"
+        ? datasetCefr
+        : modelCefr !== "unknown"
+          ? modelCefr
+          : cachedCefr !== "unknown"
+            ? cachedCefr
+            : candidateCefr;
     if (!isCefrAtOrAboveThreshold(cefr, threshold)) {
       continue;
     }
     if (isExcludedWordToken(word, lemma)) {
       continue;
     }
-    const pos = normalizePosValue(candidate?.pos, word);
+
+    const cacheKey = buildWordDefinitionCacheKey(lemma, cefr);
+    const cached = cacheKey ? cacheMap[cacheKey] : null;
+    const definition = hasText(modelEntry?.definition_simple)
+      ? String(modelEntry.definition_simple).trim()
+      : hasText(cached?.definition_simple)
+        ? String(cached.definition_simple).trim()
+        : "";
+    const example = hasText(modelEntry?.example_simple)
+      ? String(modelEntry.example_simple).trim()
+      : hasText(cached?.example_simple)
+        ? String(cached.example_simple).trim()
+        : "";
+    if (!definition || !example) {
+      continue;
+    }
+
+    const pos = normalizePosValue(modelEntry?.pos || cached?.pos || candidate?.pos, word);
     seen.add(key);
     result.push({
       word,
       lemma,
       pos,
       cefr,
-      definition_simple: buildFallbackDefinition(word, pos),
-      example_simple: buildFallbackExample(word, pos, lemma)
+      definition_simple: definition,
+      example_simple: example
     });
     if (result.length >= safeLimit) {
       break;
@@ -1065,12 +1251,8 @@ function normalizeWordEntriesWithFallback(
     }
     const pos = normalizePosValue(item?.pos, word);
     const cefr = normalizeCefrLevel(item?.cefr);
-    const definition = hasText(item?.definition_simple)
-      ? String(item.definition_simple).trim()
-      : buildFallbackDefinition(word, pos);
-    const example = hasText(item?.example_simple)
-      ? String(item.example_simple).trim()
-      : buildFallbackExample(word, pos, lemma);
+    const definition = hasText(item?.definition_simple) ? String(item.definition_simple).trim() : "";
+    const example = hasText(item?.example_simple) ? String(item.example_simple).trim() : "";
 
     result.push({
       word,
@@ -1172,6 +1354,23 @@ function isLikelyProperNameWord(word) {
   return /^[A-Z][a-z]{2,}$/.test(raw);
 }
 
+function isCapitalizedLexicalWord(word) {
+  return /^[A-Z][a-z]{2,}$/.test(String(word || "").trim());
+}
+
+function isLikelyNameChainToken(tokens, index) {
+  if (!Array.isArray(tokens) || index < 0 || index >= tokens.length) {
+    return false;
+  }
+  const current = String(tokens[index] || "").trim();
+  if (!isCapitalizedLexicalWord(current)) {
+    return false;
+  }
+  const prev = String(tokens[index - 1] || "").trim();
+  const next = String(tokens[index + 1] || "").trim();
+  return isCapitalizedLexicalWord(prev) || isCapitalizedLexicalWord(next);
+}
+
 function isExcludedWordToken(word, lemma = "") {
   const key = normalizeWordKey(word);
   const lemmaKey = normalizeWordKey(lemma);
@@ -1194,6 +1393,139 @@ function isExcludedWordToken(word, lemma = "") {
   return false;
 }
 
+function tryParseJsonValue(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) {
+    return null;
+  }
+  if (!raw.startsWith("{") && !raw.startsWith("[")) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function collectWordArraysFromPayload(payload) {
+  const arrays = [];
+  const isWordEntryObject = (value) =>
+    Boolean(
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      (typeof value.word === "string" || typeof value.lemma === "string") &&
+      (
+        typeof value.definition_simple === "string" ||
+        typeof value.example_simple === "string" ||
+        typeof value.cefr === "string"
+      )
+    );
+  const visit = (value) => {
+    if (!value) {
+      return;
+    }
+    if (Array.isArray(value)) {
+      arrays.push(value);
+      return;
+    }
+    if (typeof value === "string") {
+      const parsed = tryParseJsonValue(value);
+      if (parsed) {
+        visit(parsed);
+      }
+      return;
+    }
+    if (typeof value !== "object") {
+      return;
+    }
+
+    if (isWordEntryObject(value)) {
+      arrays.push([value]);
+      return;
+    }
+
+    if (Array.isArray(value.a2_plus_words)) {
+      arrays.push(value.a2_plus_words);
+    } else if (value.a2_plus_words && typeof value.a2_plus_words === "object") {
+      arrays.push([value.a2_plus_words]);
+    }
+    if (Array.isArray(value.words)) {
+      arrays.push(value.words);
+    } else if (value.words && typeof value.words === "object") {
+      arrays.push([value.words]);
+    }
+    if (Array.isArray(value.word_list)) {
+      arrays.push(value.word_list);
+    } else if (value.word_list && typeof value.word_list === "object") {
+      arrays.push([value.word_list]);
+    }
+    if (Array.isArray(value.items)) {
+      arrays.push(value.items);
+    } else if (value.items && typeof value.items === "object") {
+      arrays.push([value.items]);
+    }
+  };
+
+  visit(payload);
+  return arrays;
+}
+
+function extractWordEntriesFromResponseObject(responseJson) {
+  const sources = [
+    responseJson?.output_parsed,
+    responseJson?.parsed_output
+  ];
+  for (const outputItem of Array.isArray(responseJson?.output) ? responseJson.output : []) {
+    sources.push(outputItem?.parsed);
+    sources.push(outputItem?.json);
+    sources.push(outputItem?.arguments);
+    for (const contentItem of Array.isArray(outputItem?.content) ? outputItem.content : []) {
+      sources.push(contentItem?.parsed);
+      sources.push(contentItem?.json);
+      sources.push(contentItem?.arguments);
+      sources.push(contentItem?.text?.value);
+      sources.push(contentItem?.text);
+    }
+  }
+
+  for (const source of sources) {
+    const candidateArrays = collectWordArraysFromPayload(source);
+    for (const candidate of candidateArrays) {
+      const normalized = normalizeWordEntries(candidate);
+      if (normalized.length > 0) {
+        return normalized;
+      }
+    }
+  }
+
+  return [];
+}
+
+function parseWordEntriesFromPartialJson(rawText) {
+  const source = String(rawText || "").trim();
+  if (!source) {
+    return [];
+  }
+
+  const candidates = source.match(/\{[^{}]*"word"\s*:[^{}]*"example_simple"\s*:[^{}]*\}/g) || [];
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const parsed = [];
+  for (const chunk of candidates) {
+    try {
+      const json = JSON.parse(chunk);
+      parsed.push(json);
+    } catch (_error) {
+      // Ignore malformed partial object.
+    }
+  }
+  return normalizeWordEntries(parsed);
+}
+
 async function callModelForB2PlusWords({
   clientId,
   model,
@@ -1204,68 +1536,115 @@ async function callModelForB2PlusWords({
 }) {
   const threshold = normalizeWordLevelThreshold(wordLevelThreshold);
   const thresholdLabel = formatWordLevelLabel(threshold);
-  const belowLevels = getLevelsBelowThreshold(threshold).join(", ");
-  const requiredWords = (candidateHints || [])
-    .filter((item) => isCefrAtOrAboveThreshold(item?.cefr, threshold))
-    .slice(0, 8)
-    .map((item) => String(item.word || "").trim())
-    .filter(Boolean);
+  const allHints = Array.isArray(candidateHints) ? candidateHints : [];
+  const knownHints = allHints.filter(
+    (item) => item?.source === "oxford" && isCefrAtOrAboveThreshold(item?.cefr, threshold)
+  );
+  const unknownHints = allHints.filter((item) => item?.source === "model");
+  const safeWordLimit = Math.max(1, Math.min(Number(wordLimit) || 18, 6));
+  const knownCap = Math.min(knownHints.length, safeWordLimit);
+  const unknownCap = Math.max(0, safeWordLimit - knownCap);
+  const rawTargets =
+    knownHints.length > 0
+      ? [...knownHints.slice(0, knownCap), ...unknownHints.slice(0, unknownCap)]
+      : unknownHints.slice(0, safeWordLimit);
+
+  const seenTargets = new Set();
+  const targets = [];
+  for (const hint of rawTargets) {
+    const word = String(hint?.word || "").trim();
+    if (!word) {
+      continue;
+    }
+    const key = normalizeWordKey(word);
+    if (!key || seenTargets.has(key)) {
+      continue;
+    }
+    seenTargets.add(key);
+    const source = hint?.source === "oxford" ? "oxford" : "model";
+    const cefr = normalizeCefrLevel(hint?.cefr);
+    targets.push({
+      word,
+      lemma: normalizeLemma(hint?.lemma || word),
+      source,
+      cefr: source === "oxford" && cefr !== "unknown" ? cefr : "unknown"
+    });
+    if (targets.length >= safeWordLimit) {
+      break;
+    }
+  }
+
+  if (targets.length === 0) {
+    return [];
+  }
+
+  const selectedSnippet = String(selectedText || "").trim().slice(0, 180);
+
   const systemPrompt = `
-You extract difficult words and explain them for learners.
-Return JSON only.
-Return only words at ${thresholdLabel} level.
-Include any part of speech: noun, verb, adjective, adverb, preposition, pronoun, determiner, conjunction.
+You write dictionary entries for English learners.
+Return JSON only, with no markdown.
 `;
   const userPrompt = `
 Return JSON only with key "a2_plus_words".
 
-Selected text:
-"""${selectedText}"""
-
-Candidate hints (not all are hard enough):
-${JSON.stringify(candidateHints || [])}
-
-Required words to include if present:
-${JSON.stringify(requiredWords)}
+Target words:
+${JSON.stringify(targets)}
 
 Rules:
-1) Include only words that appear in candidate hints.
-2) Include all required words when they exist in selected text.
-3) Return at most ${wordLimit} entries.
-4) Do not include words below ${threshold}. (${belowLevels})
-5) If a candidate hint has cefr set to B2/C1/C2, keep that cefr exactly.
-6) If a candidate hint has cefr as unknown, estimate cefr as B2/C1/C2.
-7) Fill lemma, pos, cefr, definition_simple, example_simple.
-8) definition_simple and example_simple must not be empty.
-9) definition_simple must explain the word in this context in at least 5 words.
-10) example_simple must be a fresh sentence (not a template) with at least 6 words.
-11) Do not output generic lines like "This is a hard word in this text."
-12) Do not include person names, place names, or organization names unless the word is a true difficult vocabulary item.
-13) Do not start definition_simple or example_simple with "In this text".
+1) Return 1 to ${safeWordLimit} entries.
+2) Focus on target words only.
+3) Keep CEFR from target when source is "oxford".
+4) For source "model", choose cefr from: B2, C1, C2.
+5) Keep only words at ${thresholdLabel} or higher.
+6) For each entry include: word, lemma, pos, cefr, definition_simple, example_simple.
+7) definition_simple: 4-10 words, clear general meaning.
+8) example_simple: 7-14 words, simple natural sentence.
+9) Do not write placeholder text.
+10) Do not write "In this text" in meaning/example.
+11) Use this text only for sense disambiguation when needed:
+"""${selectedSnippet}"""
 `;
-  const response = await requestResponsesApi({
+  const parseWordResponse = (responseJson) => {
+    const structured = extractWordEntriesFromResponseObject(responseJson);
+    if (structured.length > 0) {
+      return structured;
+    }
+
+    const rawText = extractOutputText(responseJson);
+    if (!rawText) {
+      return [];
+    }
+    try {
+      return parseAndNormalizeWordCoverage(rawText);
+    } catch (_error) {
+      return parseWordEntriesFromPartialJson(rawText);
+    }
+  };
+
+  const wordOutputTokenBudget = getWordOutputTokenBudget(safeWordLimit, selectedSnippet.length);
+
+  const primaryResponse = await requestResponsesApi({
     clientId,
     model,
     systemPrompt,
     userPrompt,
-    schema: WORD_COVERAGE_SCHEMA,
-    schemaName: "easyread_word_coverage",
-    useSchema: true,
-    maxOutputTokens: WORD_MAX_OUTPUT_TOKENS,
+    useSchema: false,
+    maxOutputTokens: wordOutputTokenBudget,
     maxAttempts: 1,
     allowSchemaFallback: false
-  }).catch(() => null);
-
-  const rawText = extractOutputText(response);
-  if (rawText) {
-    try {
-      const parsed = parseAndNormalizeWordCoverage(rawText);
-      if (parsed.length > 0) {
-        return parsed;
-      }
-    } catch (_error) {
-      // continue to recovery pass
-    }
+  });
+  const primaryEntries = parseWordResponse(primaryResponse);
+  if (primaryEntries.length > 0) {
+    return primaryEntries;
+  }
+  const responseStatus = String(primaryResponse?.status || "").trim().toLowerCase();
+  const incompleteReason = String(primaryResponse?.incomplete_details?.reason || "").trim().toLowerCase();
+  if (responseStatus === "incomplete") {
+    const reason = incompleteReason || "unknown";
+    throw new EasyReadError(`Word response incomplete (${reason}).`, "WORD_INCOMPLETE");
+  }
+  if (responseStatus === "failed") {
+    throw new EasyReadError("Word response failed.", "WORD_FAILED");
   }
   return [];
 }
@@ -1647,8 +2026,12 @@ async function withTimeout(promise, timeoutMs) {
 function enforceEasyLanguage(result, selectedText) {
   const base = result && typeof result === "object" ? result : {};
   const normalized = {
+    ...base,
     simple_explanation: simplifyToEasyText(base.simple_explanation, selectedText),
     a2_plus_words: Array.isArray(base.a2_plus_words) ? base.a2_plus_words : [],
+    detected_words: Array.isArray(base.detected_words) ? base.detected_words : [],
+    words_status: typeof base.words_status === "string" ? base.words_status : "",
+    words_error: typeof base.words_error === "string" ? base.words_error : "",
     notes: simplifyNoteText(base.notes || ""),
     confidence: normalizeDisplayConfidence(base.confidence, base.notes, base.simple_explanation)
   };
@@ -2078,4 +2461,41 @@ function toUserErrorMessage(error) {
     return error.message;
   }
   return "EasyRead failed. Please try again.";
+}
+
+function normalizeWordsErrorMessage(error) {
+  if (!(error instanceof EasyReadError)) {
+    return "UNKNOWN";
+  }
+  if (error.code === "PROXY_RETRYABLE" || error.code === "PROXY_ERROR") {
+    if (/429/.test(error.message)) {
+      return "RATE_LIMIT";
+    }
+    if (/403/.test(error.message)) {
+      return "EXTENSION_NOT_ALLOWED";
+    }
+    if (/400/.test(error.message)) {
+      return "REQUEST_INVALID";
+    }
+    if (/500|502|503|504/.test(error.message)) {
+      return "SERVER_TEMPORARY";
+    }
+    return "PROXY_ERROR";
+  }
+  if (error.code === "NETWORK_RETRYABLE") {
+    return "NETWORK";
+  }
+  if (error.code === "WORD_TIMEOUT") {
+    return "TIMEOUT";
+  }
+  if (error.code === "WORD_INCOMPLETE") {
+    if (/max_output_tokens/.test(error.message)) {
+      return "OUTPUT_CUTOFF";
+    }
+    return "INCOMPLETE";
+  }
+  if (error.code === "WORD_FAILED") {
+    return "MODEL_FAILED";
+  }
+  return error.code || "UNKNOWN";
 }
