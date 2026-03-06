@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "EasyRead - English Reading Helper",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Select any English text and get a clear, simple explanation plus difficult-word meanings without leaving the page.",
   "permissions": ["storage", "activeTab", "contextMenus"],
   "host_permissions": ["<all_urls>"],
