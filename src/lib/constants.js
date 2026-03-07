@@ -11,7 +11,7 @@ export const WORD_LEVEL_VALUES = ["B2", "C1", "C2"];
 export const DEFAULT_SETTINGS = {
   anonymousClientId: "",
   wordLevelThreshold: "B2",
-  showExplanation: true,
+  showExplanation: false,
   showWords: true
 };
 

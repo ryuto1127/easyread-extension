@@ -30,6 +30,7 @@ const PROXY_EXPLAIN_STREAM_PATH = "/api/explain-stream";
 const PROXY_HEALTH_PATH = "/api/health";
 const CONTEXT_MENU_ID = "easyread_explain";
 const EXPLAIN_MODEL = "gpt-5-mini";
+const WORDS_MODEL = "gpt-4o-mini";
 const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
 const DEFAULT_EXPLANATION_MODE = "balanced";
 const DEFAULT_WORD_LEVEL_THRESHOLD = "B2";
@@ -404,6 +405,7 @@ async function handleFetchWordsRequest(payload, _sender) {
   }
 
   const selectedModel = EXPLAIN_MODEL;
+  const wordsModel = WORDS_MODEL;
   const clientId = await getOrCreateAnonymousClientId(settings);
   const pageOrigin = getPageOrigin(payload.pageUrl, payload.pageOrigin);
   const cacheKey = await buildCacheKey({
@@ -498,7 +500,7 @@ async function handleFetchWordsRequest(payload, _sender) {
     modelWords = await withTimeout(
       callModelForB2PlusWords({
         clientId,
-        model: selectedModel,
+        model: wordsModel,
         selectedText,
         candidateHints: candidates,
         wordLimit,
@@ -525,7 +527,17 @@ async function handleFetchWordsRequest(payload, _sender) {
     wordLimit,
     wordLevelThreshold: discoveryThreshold
   });
-  const finalWordItems = normalizeAndCompleteWordEntries(wordEntries, wordLimit, discoveryThreshold);
+  let finalWordItems = normalizeAndCompleteWordEntries(wordEntries, wordLimit, discoveryThreshold);
+  if (finalWordItems.length === 0 && Array.isArray(modelWords) && modelWords.length > 0) {
+    finalWordItems = normalizeAndCompleteWordEntries(
+      applyLocalCefrLevels(modelWords),
+      wordLimit,
+      discoveryThreshold
+    );
+    if (finalWordItems.length === 0 && !wordsError) {
+      wordsError = "NO_USABLE_WORD_ENTRIES";
+    }
+  }
   if (finalWordItems.length > 0) {
     await Promise.all([saveWordDefinitions(finalWordItems), saveWordCefrDecisions(finalWordItems)]);
   }
@@ -648,10 +660,10 @@ function normalizeVisibilityValue(value, fallback = true) {
 }
 
 function normalizeVisibilityPair(values) {
-  let showExplanation = normalizeVisibilityValue(values?.showExplanation, true);
+  let showExplanation = normalizeVisibilityValue(values?.showExplanation, false);
   let showWords = normalizeVisibilityValue(values?.showWords, true);
   if (!showExplanation && !showWords) {
-    showExplanation = true;
+    showWords = true;
   }
   return {
     showExplanation,
@@ -2496,6 +2508,9 @@ function normalizeWordsErrorMessage(error) {
   }
   if (error.code === "WORD_FAILED") {
     return "MODEL_FAILED";
+  }
+  if (error.code === "NO_USABLE_WORD_ENTRIES") {
+    return "NO_USABLE_WORD_ENTRIES";
   }
   return error.code || "UNKNOWN";
 }

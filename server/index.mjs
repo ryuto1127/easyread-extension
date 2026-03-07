@@ -3,18 +3,22 @@ import { URL } from "node:url";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const MAX_BODY_BYTES = 512 * 1024;
-const ALLOWED_MODEL = "gpt-5-mini";
 const RENDER_BASE_URL = "https://easyread-extension.onrender.com";
 
 const config = {
   port: toInt(process.env.PORT, 8787),
   openAiKey: process.env.OPENAI_API_KEY || "",
   allowedExtensionIds: splitCsv(process.env.ALLOWED_EXTENSION_IDS),
+  allowedModels: splitCsv(process.env.ALLOWED_MODELS),
   maxProxyOutputTokens: toInt(process.env.MAX_PROXY_OUTPUT_TOKENS, 8192),
   rateWindowMs: toInt(process.env.RATE_LIMIT_WINDOW_MS, 60_000),
   rateWindowMax: toInt(process.env.RATE_LIMIT_MAX_PER_WINDOW, 20),
   rateDayMax: toInt(process.env.RATE_LIMIT_MAX_PER_DAY, 300)
 };
+
+if (config.allowedModels.length === 0) {
+  config.allowedModels = ["gpt-5-mini", "gpt-4o-mini"];
+}
 
 if (!config.openAiKey) {
   console.error("Missing OPENAI_API_KEY in environment.");
@@ -94,8 +98,10 @@ async function handleExplain(req, res) {
   }
 
   const model = String(payload.model || "").trim();
-  if (model !== ALLOWED_MODEL) {
-    sendJson(res, 400, { error: "Model is not allowed. Use gpt-5-mini." });
+  if (!config.allowedModels.includes(model)) {
+    sendJson(res, 400, {
+      error: `Model is not allowed. Use one of: ${config.allowedModels.join(", ")}`
+    });
     return;
   }
   payload.model = model;
@@ -156,8 +162,10 @@ async function handleExplainStream(req, res) {
   }
 
   const model = String(payload.model || "").trim();
-  if (model !== ALLOWED_MODEL) {
-    sendJson(res, 400, { error: "Model is not allowed. Use gpt-5-mini." });
+  if (!config.allowedModels.includes(model)) {
+    sendJson(res, 400, {
+      error: `Model is not allowed. Use one of: ${config.allowedModels.join(", ")}`
+    });
     return;
   }
   payload.model = model;

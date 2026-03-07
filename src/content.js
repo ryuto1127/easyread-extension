@@ -28,7 +28,7 @@
     wordsPending: false,
     explanationMode: "balanced",
     wordLevelThreshold: "B2",
-    showExplanation: true,
+    showExplanation: false,
     showWords: true,
     streamedExplanation: "",
     isExplainInFlight: false,
@@ -59,20 +59,6 @@
       </div>
     </div>
     <div class="easyread-body">
-      <section class="easyread-section easyread-explanation-section">
-        <div class="easyread-section-head">
-          <h3 class="easyread-section-title">Explanation</h3>
-          <button
-            class="easyread-section-toggle"
-            type="button"
-            data-action="toggle-explanation"
-            aria-label="Toggle explanation section"
-          >
-            On
-          </button>
-        </div>
-        <div class="easyread-text easyread-explanation-panel" data-panel="explanation"></div>
-      </section>
       <section class="easyread-section easyread-words-section">
         <div class="easyread-section-head">
           <h3 class="easyread-section-title">Words</h3>
@@ -95,6 +81,20 @@
           </div>
         </div>
         <div class="easyread-words-panel" data-panel="words"></div>
+      </section>
+      <section class="easyread-section easyread-explanation-section">
+        <div class="easyread-section-head">
+          <h3 class="easyread-section-title">Explanation</h3>
+          <button
+            class="easyread-section-toggle"
+            type="button"
+            data-action="toggle-explanation"
+            aria-label="Toggle explanation section"
+          >
+            Off
+          </button>
+        </div>
+        <div class="easyread-text easyread-explanation-panel" data-panel="explanation"></div>
       </section>
     </div>
     <div class="easyread-footer">
@@ -962,7 +962,7 @@
 
   function ensureAtLeastOneSectionVisible() {
     if (!state.showExplanation && !state.showWords) {
-      state.showExplanation = true;
+      state.showWords = true;
     }
   }
 
@@ -1070,6 +1070,9 @@
     }
     if (value === "MODEL_FAILED") {
       return "Model failed for word request";
+    }
+    if (value === "NO_USABLE_WORD_ENTRIES") {
+      return "Model returned entries, but none were usable";
     }
     if (value === "EMPTY_MODEL_OUTPUT") {
       return "Model returned no word entries";
