@@ -1,0 +1,239 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 380px;
+  min-width: 380px;
+  background:
+    radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 38%),
+    linear-gradient(180deg, #f7fafc 0%, #eef4ff 100%);
+  color: #172033;
+  font: 400 14px/1.45 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
+}
+
+body {
+  padding: 14px;
+}
+
+.popup-shell {
+  display: grid;
+  gap: 10px;
+}
+
+.popup-hero {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.22), transparent 34%),
+    linear-gradient(135deg, #0f766e 0%, #2563eb 100%);
+  color: #ffffff;
+  box-shadow: 0 16px 32px rgba(37, 99, 235, 0.18);
+}
+
+.popup-hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.popup-kicker {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.popup-state-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.popup-state-pill[data-state="off"] {
+  background: rgba(15, 23, 42, 0.22);
+}
+
+.popup-title {
+  margin: 0;
+  font-size: 26px;
+  line-height: 1.05;
+}
+
+.popup-copy {
+  margin: 0;
+  max-width: 29ch;
+  font-size: 14px;
+  line-height: 1.35;
+  opacity: 0.95;
+}
+
+.popup-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(12px);
+}
+
+.popup-power-card {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 16px;
+}
+
+.popup-card-copy {
+  min-width: 0;
+}
+
+.popup-card-label {
+  margin: 0 0 5px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #61708b;
+}
+
+.popup-card-title {
+  margin: 0 0 5px;
+  font-size: 18px;
+  line-height: 1.15;
+}
+
+.popup-card-text {
+  margin: 0;
+  color: #475569;
+  line-height: 1.4;
+}
+
+.popup-power-button,
+.popup-secondary-button {
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font: 800 13px/1 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
+  transition: transform 0.14s ease, box-shadow 0.14s ease, background 0.14s ease;
+}
+
+.popup-power-button:hover,
+.popup-secondary-button:hover {
+  transform: translateY(-1px);
+}
+
+.popup-power-button {
+  min-width: 114px;
+  min-height: 42px;
+  padding: 0 20px;
+  background: linear-gradient(135deg, #1d4ed8 0%, #315ae8 100%);
+  color: #ffffff;
+  box-shadow: 0 12px 22px rgba(37, 99, 235, 0.18);
+}
+
+.popup-power-button[data-enabled="false"] {
+  background: linear-gradient(135deg, #0f766e 0%, #15918a 100%);
+  box-shadow: 0 12px 22px rgba(15, 118, 110, 0.18);
+}
+
+.popup-power-button:disabled,
+.popup-secondary-button:disabled {
+  cursor: default;
+  transform: none;
+  opacity: 0.7;
+}
+
+.popup-onboarding {
+  gap: 14px;
+}
+
+.popup-onboarding-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.popup-secondary-button {
+  min-height: 32px;
+  padding: 0 14px;
+  background: #e7edf8;
+  color: #24324a;
+  flex-shrink: 0;
+}
+
+.popup-step-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.popup-step-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #f8fbff 0%, #eef3ff 100%);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.popup-step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.popup-step-title {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.1;
+}
+
+.popup-step-copy {
+  margin: 0;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.popup-step-copy strong {
+  color: #172033;
+}
+
+.popup-status {
+  min-height: 16px;
+  margin: 0;
+  padding: 0 2px;
+  font-size: 12px;
+  color: #61708b;
+}
+
+.popup-status:empty {
+  display: none;
+}

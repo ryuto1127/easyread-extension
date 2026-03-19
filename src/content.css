@@ -5,19 +5,21 @@
 .easyread-floating-button {
   position: fixed;
   z-index: 2147483645;
-  border: 0;
+  border: 1px solid rgba(255, 255, 255, 0.28);
   border-radius: 999px;
-  background: #0f766e;
+  background: linear-gradient(135deg, #0f766e 0%, #2563eb 100%);
   color: #ffffff;
-  font: 600 13px/1.2 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  padding: 8px 12px;
-  box-shadow: 0 8px 24px rgba(15, 118, 110, 0.35);
+  font: 700 13px/1.2 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
+  padding: 9px 14px;
+  box-shadow: 0 16px 28px rgba(37, 99, 235, 0.26);
+  backdrop-filter: blur(10px);
   cursor: pointer;
-  transition: transform 0.14s ease, opacity 0.14s ease;
+  transition: transform 0.14s ease, opacity 0.14s ease, box-shadow 0.14s ease;
 }
 
 .easyread-floating-button:hover {
   transform: translateY(-1px);
+  box-shadow: 0 18px 30px rgba(37, 99, 235, 0.3);
 }
 
 .easyread-floating-button[hidden] {
@@ -28,19 +30,21 @@
 .easyread-overlay {
   position: fixed;
   z-index: 2147483646;
-  width: min(430px, calc(100vw - 20px));
+  width: min(452px, calc(100vw - 20px));
   max-height: min(82vh, 760px);
   right: 10px;
   bottom: 12px;
   display: grid;
-  grid-template-rows: auto auto auto;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 14px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 18px;
   overflow: hidden;
-  background: #fffef8;
+  background:
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.28), transparent 28%),
+    linear-gradient(180deg, #fffdf7 0%, #f4f8ff 100%);
   color: #1f2937;
-  box-shadow: 0 22px 48px rgba(15, 23, 42, 0.26);
-  font: 400 14px/1.5 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  box-shadow: 0 28px 56px rgba(15, 23, 42, 0.24);
+  font: 400 14px/1.56 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
 }
 
 .easyread-overlay[hidden] {
@@ -50,7 +54,7 @@
 .easyread-overlay button,
 .easyread-overlay select,
 .easyread-overlay label {
-  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif !important;
+  font-family: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif !important;
   text-transform: none !important;
   letter-spacing: normal !important;
 }
@@ -59,76 +63,87 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  background: linear-gradient(90deg, #0f766e 0%, #2563eb 100%);
+  gap: 10px;
+  padding: 12px 14px;
+  background:
+    linear-gradient(90deg, rgba(15, 118, 110, 0.98) 0%, rgba(37, 99, 235, 0.98) 100%);
   color: white;
 }
 
 .easyread-title {
-  font-weight: 700;
-  letter-spacing: 0.2px;
+  font: 800 17px/1 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
+  letter-spacing: 0.02em;
 }
 
 .easyread-header-actions {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .easyread-icon-btn {
-  border: 0;
-  border-radius: 8px;
-  padding: 6px 8px;
-  background: rgba(255, 255, 255, 0.17);
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
   color: white;
-  font: 600 12px/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font: 700 12px/1 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
   text-transform: none;
   letter-spacing: normal;
   cursor: pointer;
+  backdrop-filter: blur(10px);
 }
 
 .easyread-icon-btn:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.24);
 }
 
 .easyread-body {
   overflow: auto;
-  padding: 12px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
+  align-content: flex-start;
   gap: 12px;
   min-height: 0;
 }
 
 .easyread-section {
   display: grid;
-  gap: 6px;
+  gap: 10px;
   min-height: 0;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.05);
 }
 
 .easyread-section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
 }
 
 .easyread-section-title {
   margin: 0;
-  font: 700 13px/1.2 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font: 800 12px/1 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
   color: #334155;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.12em;
 }
 
 .easyread-section-toggle {
-  border: 1px solid rgba(37, 99, 235, 0.25);
+  border: 1px solid rgba(37, 99, 235, 0.22);
   border-radius: 999px;
-  min-height: 24px;
-  padding: 0 10px;
-  background: #ffffff;
+  min-height: 28px;
+  padding: 0 12px;
+  background: rgba(255, 255, 255, 0.95);
   color: #64748b;
-  font: 700 11px/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font: 800 11px/1 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
@@ -155,58 +170,85 @@
 
 .easyread-explanation-section {
   align-content: start;
+  gap: 8px;
+  min-height: 0;
 }
 
 .easyread-explanation-panel {
   overflow-wrap: break-word;
+  padding-top: 2px;
+  color: #24324a;
+  font-size: 15px;
+  line-height: 1.66;
+  max-height: 32vh;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .easyread-words-section {
   align-content: start;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 6px;
 }
 
 .easyread-word-level-row {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  margin-top: -2px;
+  margin-top: 0;
 }
 
 .easyread-words-panel {
-  height: clamp(120px, 22vh, 188px);
+  min-height: 170px;
+  max-height: clamp(240px, 40vh, 360px);
   overflow-y: auto;
   overflow-anchor: none;
-  padding-right: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .easyread-word-item {
-  border: 1px solid rgba(15, 23, 42, 0.1);
-  border-radius: 10px;
-  padding: 10px;
-  margin-bottom: 8px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 10px;
   background: #ffffff;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
+}
+
+.easyread-word-item:last-child {
+  margin-bottom: 0;
 }
 
 .easyread-word-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 8px;
-  margin-bottom: 4px;
+  gap: 6px 10px;
+  margin-bottom: 6px;
 }
 
 .easyread-word {
-  font-weight: 700;
+  font: 800 15px/1.2 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
+  color: #1e293b;
 }
 
 .easyread-word-meta {
-  color: #6b7280;
+  color: #64748b;
   font-size: 12px;
 }
 
+.easyread-word-item div:not(.easyread-word-head) {
+  color: #334155;
+}
+
 .easyread-footer {
-  padding: 10px 12px;
-  border-top: 1px solid rgba(15, 23, 42, 0.1);
-  background: #f8fafc;
+  padding: 12px 14px;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(248, 250, 252, 0.9);
+  backdrop-filter: blur(12px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -226,66 +268,58 @@
   gap: 6px;
 }
 
-.easyread-inline-setting {
+.easyread-level-toggle-group {
   display: inline-flex;
   align-items: center;
-  gap: 0;
+  gap: 6px;
 }
 
-.easyread-inline-setting label {
-  font: 600 11px/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  color: #475569;
-}
-
-.easyread-inline-setting-words {
-  flex-shrink: 0;
-}
-
-.easyread-level-select {
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  appearance: none;
-  border: 1px solid rgba(37, 99, 235, 0.25);
+.easyread-level-toggle {
+  min-height: 30px;
+  min-width: 56px;
+  padding: 0 12px;
+  border: 1px solid rgba(37, 99, 235, 0.22);
   border-radius: 999px;
   background: #ffffff;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%232563eb' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  background-size: 10px 6px;
   color: #1d4ed8;
-  height: 26px;
-  min-width: 80px;
-  padding: 0 24px 0 10px;
-  font: 700 11px/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  text-align: center;
-  text-align-last: center;
-  text-transform: none;
-  letter-spacing: normal;
-  outline: none;
+  font: 800 11px/1 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
+  cursor: pointer;
 }
 
-.easyread-level-select:focus {
+.easyread-level-toggle[data-active="true"] {
+  background: #1d4ed8;
   border-color: #1d4ed8;
+  color: #ffffff;
+}
+
+.easyread-level-toggle[data-active="false"] {
+  background: #ffffff;
+  color: #1d4ed8;
+}
+
+.easyread-level-toggle:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .easyread-secondary-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid rgba(37, 99, 235, 0.25);
+  border: 1px solid rgba(37, 99, 235, 0.22);
   border-radius: 999px;
-  min-height: 32px;
-  padding: 0 12px;
-  background: #e8efff;
+  min-height: 34px;
+  padding: 0 14px;
+  background: #edf2ff;
   color: #1d4ed8;
-  font: 600 12px/1 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font: 700 12px/1 "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
   text-transform: none;
   letter-spacing: normal;
   cursor: pointer;
 }
 
 .easyread-secondary-btn:hover {
-  background: #dbe7ff;
+  background: #dfe9ff;
 }
 
 .easyread-secondary-btn[data-active="true"] {

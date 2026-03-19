@@ -31,6 +31,7 @@ const PROXY_HEALTH_PATH = "/api/health";
 const CONTEXT_MENU_ID = "easyread_explain";
 const EXPLAIN_MODEL = "gpt-5-mini";
 const WORDS_MODEL = "gpt-4o-mini";
+const ACTION_BADGE_OFF_COLOR = "#94a3b8";
 const EXPLANATION_MODES = new Set(["simple", "balanced", "detailed"]);
 const DEFAULT_EXPLANATION_MODE = "balanced";
 const DEFAULT_WORD_LEVEL_THRESHOLD = "B2";
@@ -139,27 +140,45 @@ let proxyWarmupInFlight = null;
 let lastProxyWarmupAt = 0;
 
 chrome.runtime.onInstalled.addListener(async () => {
-  await ensureSettings();
+  const settings = await ensureSettings();
   await pruneExpiredCacheEntries();
   await pruneExpiredWordDefinitionEntries();
   await pruneExpiredWordCefrEntries();
-  await createContextMenu();
-  void warmProxyConnection(true);
+  await syncActionState(settings);
+  await createContextMenu(settings);
+  if (normalizeEnabledValue(settings.enabled, true)) {
+    void warmProxyConnection(true);
+  }
 });
 
 chrome.runtime.onStartup.addListener(async () => {
+  const settings = await ensureSettings();
   await pruneExpiredWordDefinitionEntries();
   await pruneExpiredWordCefrEntries();
-  await createContextMenu();
-  void warmProxyConnection(true);
+  await syncActionState(settings);
+  await createContextMenu(settings);
+  if (normalizeEnabledValue(settings.enabled, true)) {
+    void warmProxyConnection(true);
+  }
 });
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+chrome.action.onClicked.addListener(async () => {
+  const settings = await getSettings();
+  await updateRuntimeSettings({
+    enabled: !normalizeEnabledValue(settings.enabled, true)
+  });
+});
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== CONTEXT_MENU_ID || !tab?.id) {
     return;
   }
+  const settings = await getSettings();
+  if (!normalizeEnabledValue(settings.enabled, true)) {
+    return;
+  }
 
-  chrome.tabs.sendMessage(tab.id, {
+  safeSendTabMessage(tab.id, {
     type: "easyread-context-explain",
     selectionText: info.selectionText || ""
   });
@@ -198,16 +217,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     getSettings()
       .then((settings) => {
         const visibility = normalizeVisibilityPair(settings);
-        return (
         sendResponse({
           ok: true,
           data: {
+            enabled: normalizeEnabledValue(settings.enabled, true),
+            hasSeenOnboarding: normalizeBooleanValue(settings.hasSeenOnboarding, false),
             wordLevelThreshold: normalizeWordLevelThreshold(settings.wordLevelThreshold),
             showExplanation: visibility.showExplanation,
             showWords: visibility.showWords
           }
-        })
-      );
+        });
       })
       .catch((error) => sendResponse({ ok: false, error: toUserErrorMessage(error) }));
     return true;
@@ -221,8 +240,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "easyread-warmup") {
-    warmProxyConnection()
-      .then((warmed) => sendResponse({ ok: true, warmed }))
+    getSettings()
+      .then((settings) => {
+        if (!normalizeEnabledValue(settings.enabled, true)) {
+          return false;
+        }
+        return warmProxyConnection();
+      })
+      .then((warmed) => sendResponse({ ok: true, warmed: Boolean(warmed) }))
       .catch(() => sendResponse({ ok: true, warmed: false }));
     return true;
   }
@@ -233,12 +258,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function ensureSettings() {
   const settings = await getSettings();
   const visibility = normalizeVisibilityPair(settings);
-  await saveSettings({
+  const next = {
     ...settings,
+    enabled: normalizeEnabledValue(settings.enabled, true),
+    hasSeenOnboarding: normalizeBooleanValue(settings.hasSeenOnboarding, false),
     wordLevelThreshold: normalizeWordLevelThreshold(settings.wordLevelThreshold),
     showExplanation: visibility.showExplanation,
     showWords: visibility.showWords
-  });
+  };
+  await saveSettings(next);
+  return next;
 }
 
 async function updateRuntimeSettings(payload) {
@@ -250,20 +279,36 @@ async function updateRuntimeSettings(payload) {
   });
   const next = {
     ...current,
+    enabled: normalizeEnabledValue(patch.enabled ?? current.enabled, true),
+    hasSeenOnboarding: normalizeBooleanValue(
+      patch.hasSeenOnboarding ?? current.hasSeenOnboarding,
+      false
+    ),
     wordLevelThreshold: normalizeWordLevelThreshold(patch.wordLevelThreshold ?? current.wordLevelThreshold),
     showExplanation: visibility.showExplanation,
     showWords: visibility.showWords
   };
   await saveSettings(next);
+  await syncActionState(next);
+  await createContextMenu(next);
+  if (next.enabled && !normalizeEnabledValue(current.enabled, true)) {
+    void warmProxyConnection(true);
+  }
   return {
+    enabled: next.enabled,
+    hasSeenOnboarding: next.hasSeenOnboarding,
     wordLevelThreshold: next.wordLevelThreshold,
     showExplanation: next.showExplanation,
     showWords: next.showWords
   };
 }
 
-async function createContextMenu() {
+async function createContextMenu(settingsOverride = null) {
   await chrome.contextMenus.removeAll();
+  const settings = settingsOverride || await getSettings();
+  if (!normalizeEnabledValue(settings.enabled, true)) {
+    return;
+  }
   chrome.contextMenus.create({
     id: CONTEXT_MENU_ID,
     title: "Explain in Simple English",
@@ -271,13 +316,34 @@ async function createContextMenu() {
   });
 }
 
+async function syncActionState(settingsOverride = null) {
+  const settings = settingsOverride || await getSettings();
+  const enabled = normalizeEnabledValue(settings.enabled, true);
+  await Promise.all([
+    chrome.action.setBadgeText({ text: enabled ? "" : "OFF" }),
+    chrome.action.setBadgeBackgroundColor({
+      color: enabled ? "#0f766e" : ACTION_BADGE_OFF_COLOR
+    }),
+    chrome.action.setTitle({
+      title: enabled
+        ? "EasyRead is on. Click to turn it off."
+        : "EasyRead is off. Click to turn it on."
+    })
+  ]);
+}
+
 async function handleExplainRequest(payload, sender) {
   const settings = await getSettings();
+  ensureExtensionEnabled(settings);
   const selectedText = normalizeSelection(payload.selectedText);
   const requestId = normalizeRequestId(payload.requestId);
   const explanationMode = normalizeExplanationMode(payload.explanationMode);
   const wordLevelThreshold = normalizeWordLevelThreshold(settings.wordLevelThreshold);
   const discoveryThreshold = WORD_DISCOVERY_BASE_THRESHOLD;
+  const baseResult =
+    payload?.baseResult && typeof payload.baseResult === "object"
+      ? normalizeResultShape(payload.baseResult)
+      : null;
 
   if (!selectedText) {
     throw new EasyReadError("Please select text first.", "NO_SELECTION");
@@ -304,20 +370,22 @@ async function handleExplainRequest(payload, sender) {
   const cached = await getCachedResponse(cacheKey);
   if (cached) {
     const safeCachedRaw = normalizeResultShape(cached);
-    const safeCached = enforceEasyLanguage(
-      {
-        ...safeCachedRaw,
-        a2_plus_words: Array.isArray(safeCachedRaw.a2_plus_words) ? safeCachedRaw.a2_plus_words : []
-      },
-      selectedText
+    const safeCached = mergeWordState(
+      enforceEasyLanguage(
+        {
+          ...safeCachedRaw,
+          a2_plus_words: Array.isArray(safeCachedRaw.a2_plus_words) ? safeCachedRaw.a2_plus_words : []
+        },
+        selectedText
+      ),
+      baseResult
     );
     if (!isOutputUsable(safeCached)) {
       // Ignore invalid cached payload and fetch a fresh model result.
     } else {
-      const cachedWords = Array.isArray(safeCached.a2_plus_words) ? safeCached.a2_plus_words : [];
       const filteredCached = filterResultByWordLevel(safeCached, wordLevelThreshold);
-      const cachedHasWords = cachedWords.length > 0;
-      if (!cachedHasWords) {
+      const cachedHasResolvedWords = hasResolvedWordsResult(safeCached);
+      if (!cachedHasResolvedWords) {
         const cachedCandidates = extractWordCandidates(selectedText, discoveryThreshold, MAX_A2_CANDIDATES);
         if (cachedCandidates.length > 0) {
           return {
@@ -350,7 +418,6 @@ async function handleExplainRequest(payload, sender) {
     requestId,
     streamTabId: typeof sender?.tab?.id === "number" ? sender.tab.id : null
   });
-  const wordsPending = explanationOnly.candidateCount > 0;
   const immediateResult = enforceEasyLanguage(
     {
       ...explanationOnly.parsed,
@@ -358,11 +425,13 @@ async function handleExplainRequest(payload, sender) {
     },
     selectedText
   );
-  const safeImmediateResult = normalizeResultShape(immediateResult);
+  const safeImmediateResult = mergeWordState(normalizeResultShape(immediateResult), baseResult);
 
   if (!isOutputUsable(safeImmediateResult)) {
     throw new EasyReadError("Model did not return a usable explanation. Please try again.", "EMPTY_RESULT");
   }
+
+  const wordsPending = !hasResolvedWordsResult(safeImmediateResult) && explanationOnly.candidateCount > 0;
 
   await saveCachedResponse(
     cacheKey,
@@ -377,7 +446,7 @@ async function handleExplainRequest(payload, sender) {
 
   return {
     cached: false,
-    result: safeImmediateResult,
+    result: filterResultByWordLevel(safeImmediateResult, wordLevelThreshold),
     requestId,
     wordsPending,
     explanationMode,
@@ -387,6 +456,7 @@ async function handleExplainRequest(payload, sender) {
 
 async function handleFetchWordsRequest(payload, _sender) {
   const settings = await getSettings();
+  ensureExtensionEnabled(settings);
   const selectedText = normalizeSelection(payload.selectedText);
   const requestId = normalizeRequestId(payload.requestId);
   const explanationMode = normalizeExplanationMode(payload.explanationMode);
@@ -467,6 +537,7 @@ async function handleFetchWordsRequest(payload, _sender) {
         ...baseResult,
         a2_plus_words: [],
         detected_words: [],
+        words_status: "ready",
         notes: baseResult.notes || ""
       },
       selectedText
@@ -509,8 +580,29 @@ async function handleFetchWordsRequest(payload, _sender) {
       wordTimeoutMs
     );
   } catch (error) {
-    modelWords = [];
-    wordsError = normalizeWordsErrorMessage(error);
+    const normalizedError = normalizeWordsErrorMessage(error);
+    if (shouldFallbackToExplainWordsModel(normalizedError)) {
+      try {
+        modelWords = await withTimeout(
+          callModelForB2PlusWords({
+            clientId,
+            model: EXPLAIN_MODEL,
+            selectedText,
+            candidateHints: candidates,
+            wordLimit,
+            wordLevelThreshold: discoveryThreshold
+          }),
+          wordTimeoutMs
+        );
+        wordsError = "";
+      } catch (fallbackError) {
+        modelWords = [];
+        wordsError = normalizeWordsErrorMessage(fallbackError);
+      }
+    } else {
+      modelWords = [];
+      wordsError = normalizedError;
+    }
   }
   if (!wordsError && (!Array.isArray(modelWords) || modelWords.length === 0) && candidates.length > 0) {
     wordsError = "EMPTY_MODEL_OUTPUT";
@@ -581,6 +673,7 @@ async function handleFetchWordsRequest(payload, _sender) {
 
 async function handleRefilterWordsRequest(payload) {
   const settings = await getSettings();
+  ensureExtensionEnabled(settings);
   const selectedText = normalizeSelection(payload.selectedText);
   const requestId = normalizeRequestId(payload.requestId);
   const explanationMode = normalizeExplanationMode(payload.explanationMode);
@@ -652,6 +745,17 @@ function normalizeWordLevelThreshold(value) {
   return WORD_LEVEL_THRESHOLD_VALUES.has(level) ? level : DEFAULT_WORD_LEVEL_THRESHOLD;
 }
 
+function normalizeBooleanValue(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return Boolean(fallback);
+}
+
+function normalizeEnabledValue(value, fallback = true) {
+  return normalizeBooleanValue(value, fallback);
+}
+
 function normalizeVisibilityValue(value, fallback = true) {
   if (typeof value === "boolean") {
     return value;
@@ -669,6 +773,16 @@ function normalizeVisibilityPair(values) {
     showExplanation,
     showWords
   };
+}
+
+function shouldFallbackToExplainWordsModel(wordsError) {
+  return WORDS_MODEL !== EXPLAIN_MODEL && wordsError === "REQUEST_INVALID";
+}
+
+function ensureExtensionEnabled(settings) {
+  if (!normalizeEnabledValue(settings?.enabled, true)) {
+    throw new EasyReadError("EasyRead is turned off. Turn it on from the extension popup.", "DISABLED");
+  }
 }
 
 function formatWordLevelLabel(level) {
@@ -715,6 +829,33 @@ function normalizeResultShape(result) {
     base.confidence = 0.5;
   }
   return base;
+}
+
+function mergeWordState(result, source) {
+  const next = normalizeResultShape(result);
+  const prior = source && typeof source === "object" ? normalizeResultShape(source) : null;
+  if (!prior) {
+    return next;
+  }
+
+  if (next.a2_plus_words.length === 0 && prior.a2_plus_words.length > 0) {
+    next.a2_plus_words = prior.a2_plus_words;
+  }
+  if (next.detected_words.length === 0 && prior.detected_words.length > 0) {
+    next.detected_words = prior.detected_words;
+  }
+  if (!next.words_status && prior.words_status) {
+    next.words_status = prior.words_status;
+  }
+  if (!next.words_error && prior.words_error) {
+    next.words_error = prior.words_error;
+  }
+  return next;
+}
+
+function hasResolvedWordsResult(result) {
+  const safe = normalizeResultShape(result);
+  return safe.a2_plus_words.length > 0 || safe.words_status === "ready" || safe.words_status === "definitions_unavailable";
 }
 
 function getPageOrigin(pageUrl, fallbackOrigin) {
@@ -944,13 +1085,51 @@ function normalizeWordKey(word) {
 function lookupLocalCefrLevel(word, lemma = "") {
   const wordKey = normalizeWordKey(word);
   const lemmaKey = normalizeWordKey(lemma);
-  const level =
-    CEFR_WORD_LEVEL_MAP[wordKey] ||
-    CEFR_WORD_LEVEL_MAP[lemmaKey] ||
-    CEFR_WORD_LEVEL_MAP[normalizeLemma(wordKey)] ||
-    CEFR_WORD_LEVEL_MAP[normalizeLemma(lemmaKey)] ||
-    "";
-  return normalizeCefrLevel(level);
+  const normalizedWordLemma = normalizeLemma(wordKey);
+  const normalizedLemma = normalizeLemma(lemmaKey);
+  const surfaceLevel = getExactLocalCefrLevel(wordKey);
+  const lemmaLevel = getExactLocalCefrLevel(lemmaKey);
+  const normalizedWordLevel = getExactLocalCefrLevel(normalizedWordLemma);
+  const normalizedLemmaLevel = getExactLocalCefrLevel(normalizedLemma);
+
+  if (shouldPreferLemmaCefr(wordKey, lemmaKey || normalizedWordLemma)) {
+    return (
+      lemmaLevel !== "unknown"
+        ? lemmaLevel
+        : normalizedLemmaLevel !== "unknown"
+          ? normalizedLemmaLevel
+          : normalizedWordLevel !== "unknown"
+            ? normalizedWordLevel
+            : surfaceLevel
+    );
+  }
+
+  return (
+    surfaceLevel !== "unknown"
+      ? surfaceLevel
+      : lemmaLevel !== "unknown"
+        ? lemmaLevel
+        : normalizedWordLevel !== "unknown"
+          ? normalizedWordLevel
+          : normalizedLemmaLevel
+  );
+}
+
+function getExactLocalCefrLevel(value) {
+  const key = normalizeWordKey(value);
+  if (!key) {
+    return "unknown";
+  }
+  return normalizeCefrLevel(CEFR_WORD_LEVEL_MAP[key] || "");
+}
+
+function shouldPreferLemmaCefr(word, lemma = "") {
+  const wordKey = normalizeWordKey(word);
+  const lemmaKey = normalizeWordKey(lemma);
+  if (!wordKey || !lemmaKey || wordKey === lemmaKey) {
+    return false;
+  }
+  return /(?:ing|ied|ed)$/.test(wordKey);
 }
 
 function extractWordCandidates(
@@ -1023,15 +1202,7 @@ function extractWordCandidates(
   }
 
   return [...candidatesByKey.values()]
-    .sort((a, b) => {
-      if (a.knownLevel !== b.knownLevel) {
-        return a.knownLevel ? -1 : 1;
-      }
-      if (a.rank !== b.rank) {
-        return b.rank - a.rank;
-      }
-      return a.index - b.index;
-    })
+    .sort((a, b) => a.index - b.index)
     .slice(0, safeLimit)
     .map(({ word, lemma, cefr, source }) => ({
       word,
@@ -1084,7 +1255,7 @@ function extractDatasetWordCandidates(
   }
 
   return [...candidatesByKey.values()]
-    .sort((a, b) => (b.rank - a.rank) || (a.index - b.index))
+    .sort((a, b) => a.index - b.index)
     .slice(0, safeLimit)
     .map(({ word, lemma, cefr, source }) => ({
       word,
@@ -1300,19 +1471,57 @@ function normalizeLemma(value) {
   if (text.endsWith("ies") && text.length > 4) {
     return `${text.slice(0, -3)}y`;
   }
+  if (text.endsWith("ied") && text.length > 4) {
+    return `${text.slice(0, -3)}y`;
+  }
   if (text.endsWith("ing") && text.length > 5) {
-    return text.slice(0, -3);
+    const stem = text.slice(0, -3);
+    const candidates = [stem];
+    if (endsWithDoubledConsonant(stem)) {
+      candidates.unshift(stem.slice(0, -1));
+    }
+    candidates.push(`${stem}e`);
+    return pickKnownLemmaCandidate(candidates, stem);
   }
   if (text.endsWith("ed") && text.length > 4) {
-    return text.slice(0, -2);
+    const stem = text.slice(0, -2);
+    const candidates = [stem];
+    if (endsWithDoubledConsonant(stem)) {
+      candidates.unshift(stem.slice(0, -1));
+    }
+    candidates.push(`${stem}e`);
+    return pickKnownLemmaCandidate(candidates, stem);
   }
   if (text.endsWith("es") && text.length > 4) {
-    return text.slice(0, -2);
+    const stem = text.slice(0, -2);
+    return pickKnownLemmaCandidate([stem, `${stem}e`], stem);
   }
   if (text.endsWith("s") && text.length > 3) {
-    return text.slice(0, -1);
+    const stem = text.slice(0, -1);
+    return isKnownLemmaCandidate(stem) ? stem : text;
   }
   return text;
+}
+
+function pickKnownLemmaCandidate(candidates, fallback) {
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    if (isKnownLemmaCandidate(candidate)) {
+      return candidate;
+    }
+  }
+  return fallback;
+}
+
+function isKnownLemmaCandidate(value) {
+  const key = normalizeWordKey(value);
+  if (!key) {
+    return false;
+  }
+  return Boolean(CEFR_WORD_LEVEL_MAP[key] || A1_A2_WORD_SET.has(key));
+}
+
+function endsWithDoubledConsonant(value) {
+  return /([b-df-hj-np-tv-z])\1$/.test(String(value || ""));
 }
 
 function normalizePosValue(pos, word) {
@@ -1888,16 +2097,24 @@ function sendExplanationStreamEvent(tabId, payload) {
   if (typeof tabId !== "number") {
     return;
   }
-  chrome.tabs.sendMessage(
-    tabId,
-    {
-      type: "easyread-explanation-stream",
-      ...payload
-    },
-    () => {
+  safeSendTabMessage(tabId, {
+    type: "easyread-explanation-stream",
+    ...payload
+  });
+}
+
+function safeSendTabMessage(tabId, payload) {
+  if (typeof tabId !== "number") {
+    return;
+  }
+
+  try {
+    chrome.tabs.sendMessage(tabId, payload, () => {
       void chrome.runtime.lastError;
-    }
-  );
+    });
+  } catch (_error) {
+    // Ignore messaging errors when the content script is not attached to the tab.
+  }
 }
 
 async function requestResponsesApi({

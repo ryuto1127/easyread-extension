@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EasyRead</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup-shell">
+      <section class="popup-hero">
+        <div class="popup-hero-top">
+          <p class="popup-kicker">EasyRead</p>
+          <span id="hero-state" class="popup-state-pill">On</span>
+        </div>
+        <h1 class="popup-title">Words first. Explanation when needed.</h1>
+        <p class="popup-copy">Pause EasyRead here or keep it ready while you read.</p>
+      </section>
+
+      <section class="popup-card popup-power-card" aria-labelledby="power-heading">
+        <div class="popup-card-copy">
+          <p class="popup-card-label">Extension</p>
+          <h2 id="power-heading" class="popup-card-title">EasyRead is on</h2>
+          <p id="power-copy" class="popup-card-text">
+            Explain buttons and right-click actions are active.
+          </p>
+        </div>
+        <button id="toggle-enabled" class="popup-power-button" type="button">Turn Off</button>
+      </section>
+
+      <section id="onboarding-card" class="popup-card popup-onboarding" hidden>
+        <div class="popup-onboarding-top">
+          <div class="popup-card-copy">
+            <p class="popup-card-label">Start here</p>
+            <h2 class="popup-card-title">How it works</h2>
+          </div>
+          <button id="dismiss-onboarding" class="popup-secondary-button" type="button">Hide tips</button>
+        </div>
+        <div class="popup-step-grid">
+          <article class="popup-step-card">
+            <span class="popup-step-number">1</span>
+            <h3 class="popup-step-title">Select</h3>
+            <p class="popup-step-copy">Highlight text on any page.</p>
+          </article>
+          <article class="popup-step-card">
+            <span class="popup-step-number">2</span>
+            <h3 class="popup-step-title">Open words</h3>
+            <p class="popup-step-copy">Click <strong>Explain</strong> to get the word list first.</p>
+          </article>
+          <article class="popup-step-card">
+            <span class="popup-step-number">3</span>
+            <h3 class="popup-step-title">Add detail</h3>
+            <p class="popup-step-copy">Turn on <strong>Explanation</strong> only when you want more help.</p>
+          </article>
+        </div>
+      </section>
+
+      <p id="popup-status" class="popup-status" role="status" aria-live="polite"></p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
